@@ -44,6 +44,14 @@ function isDirectConfirmation(value) {
   );
 }
 
+function isDirectRejection(value) {
+  const text = normalizeForIntent(value);
+  if (!text || text.length > 120) return false;
+  return /^(no|no gracias|no confirmo|incorrecto|cambiar|quiero cambiar|otra fecha|no|no thanks|do not confirm|incorrect|change|change it|another date)\b/.test(
+    text,
+  );
+}
+
 function safeJsonParse(value, fallback = null) {
   if (value && typeof value === "object") return value;
   if (typeof value !== "string" || !value.trim()) return fallback;
@@ -915,6 +923,20 @@ export default async function handler(request, response) {
       });
     }
 
+    if (analysis.bookingRelated && state.stage === "pending_approval") {
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        handoffRequired: true,
+        language,
+        reply:
+          language === "es"
+            ? `Ya tienes una solicitud pendiente para ${state.selectedDisplay}. Para cambiarla o solicitar otra fecha, un miembro del equipo debe ayudarte personalmente.`
+            : `You already have a request pending for ${state.selectedDisplay}. A team member must assist you to change it or request another date.`,
+        stage: state.stage,
+      });
+    }
+
     if (analysis.cancelBooking) {
       state = defaultState();
       await saveState(contactId, state);
@@ -930,7 +952,44 @@ export default async function handler(request, response) {
       });
     }
 
+    const previousPreferredDate = state.preferredDate;
+    const previousPreferredPeriod = state.preferredPeriod;
     state = applyUpdates({ ...state, active: true, language }, analysis);
+
+    if (
+      state.stage === "awaiting_confirmation" &&
+      isDirectRejection(effectiveCurrentMessage)
+    ) {
+      state.preferredDate = null;
+      state.preferredPeriod = null;
+      state.offeredSlots = [];
+      state.selectedStart = null;
+      state.selectedDisplay = null;
+      state.stage = "collecting_preference";
+      await saveState(contactId, state);
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        language,
+        reply:
+          language === "es"
+            ? "De acuerdo, no enviaré esa solicitud. ¿Qué nueva fecha prefieres para la visita?"
+            : "Okay, I will not submit that request. What new date would you prefer for the visit?",
+        stage: state.stage,
+      });
+    }
+
+    const changedConfirmationPreference =
+      state.stage === "awaiting_confirmation" &&
+      ((analysis.preferredDate && state.preferredDate !== previousPreferredDate) ||
+        (analysis.preferredPeriod && state.preferredPeriod !== previousPreferredPeriod));
+
+    if (changedConfirmationPreference) {
+      state.offeredSlots = [];
+      state.selectedStart = null;
+      state.selectedDisplay = null;
+      state.stage = "collecting_preference";
+    }
 
     if (
       state.stage === "awaiting_slot_selection" &&
