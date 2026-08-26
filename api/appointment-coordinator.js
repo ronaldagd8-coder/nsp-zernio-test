@@ -52,6 +52,18 @@ function isDirectRejection(value) {
   );
 }
 
+function isEmojiOnlyMessage(value) {
+  const text = normalizeText(value, 500);
+  if (!text) return false;
+
+  const remainder = text.replace(
+    /[\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Emoji_Modifier}\uFE0E\uFE0F\u200D\s]/gu,
+    "",
+  );
+
+  return remainder.length === 0;
+}
+
 function safeJsonParse(value, fallback = null) {
   if (value && typeof value === "object") return value;
   if (typeof value !== "string" || !value.trim()) return fallback;
@@ -856,6 +868,16 @@ export default async function handler(request, response) {
       return response.status(422).json({
         ok: false,
         error: "The current message could not be retrieved",
+      });
+    }
+
+    if (isEmojiOnlyMessage(effectiveCurrentMessage)) {
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        suppressReply: true,
+        reply: null,
+        stage: "silent_emoji",
       });
     }
 
