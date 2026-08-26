@@ -126,15 +126,32 @@ export default async function handler(request, response) {
       data = null;
     }
 
-    if (!messagesResponse.ok) {
+        if (!messagesResponse.ok) {
       console.error("Zernio latest-message lookup failed", {
         status: messagesResponse.status,
+        code: data?.code ?? null,
       });
 
       return response.status(502).json({
         ok: false,
         error: "Latest-message lookup failed",
         upstreamStatus: messagesResponse.status,
+        upstreamError:
+          typeof data?.error === "string"
+            ? data.error.slice(0, 300)
+            : null,
+        upstreamCode:
+          typeof data?.code === "string"
+            ? data.code.slice(0, 100)
+            : null,
+        upstreamParam:
+          typeof data?.param === "string"
+            ? data.param.slice(0, 100)
+            : null,
+        upstreamPlatform:
+          typeof data?.platform === "string"
+            ? data.platform.slice(0, 100)
+            : null,
       });
     }
 
