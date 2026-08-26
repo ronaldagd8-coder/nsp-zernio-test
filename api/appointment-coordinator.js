@@ -792,16 +792,11 @@ export default async function handler(request, response) {
       await saveState(contactId, state);
       return response.status(200).json({
         ok: true,
+        debug: `READ=${normalizeText(effectiveCurrentMessage, 80)}|DIRECT=${isDirectConfirmation(effectiveCurrentMessage)}|AI=${analysis.explicitConfirmation === true}`,
         handled: true,
         language,
         reply: confirmationReply(state, language),
         stage: state.stage,
-        confirmationDiagnostic: {
-          messageRead: normalizeText(effectiveCurrentMessage, 160),
-          normalizedMessage: normalizeForIntent(effectiveCurrentMessage),
-          directConfirmation: isDirectConfirmation(effectiveCurrentMessage),
-          aiConfirmation: analysis.explicitConfirmation === true,
-        },
       });
     }
 
