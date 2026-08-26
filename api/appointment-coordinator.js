@@ -1,13 +1,17 @@
-import { timingSafeEqual } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  createSign,
+  timingSafeEqual,
+} from "node:crypto";
 
+const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const GOOGLE_CALENDAR_API = "https://www.googleapis.com/calendar/v3";
+const GOOGLE_SCOPE = "https://www.googleapis.com/auth/calendar";
 const ZERNIO_API_BASE_URL = "https://zernio.com/api/v1";
-const OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
-const BOOKING_FIELD_NAME = "booking_state";
-const MAX_HISTORY_MESSAGES = 15;
+const TIME_ZONE = "America/Chicago";
 
-export const config = {
-  maxDuration: 60,
-};
+export const config = { maxDuration: 60 };
 
 function secretsMatch(receivedSecret, expectedSecret) {
   if (!receivedSecret || !expectedSecret) return false;
@@ -16,71 +20,90 @@ function secretsMatch(receivedSecret, expectedSecret) {
   return received.length === expected.length && timingSafeEqual(received, expected);
 }
 
-function normalizeText(value, maxLength = 2000) {
+function normalizeText(value, maxLength = 1000) {
   return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
 }
 
-function normalizeForIntent(value) {
-  return normalizeText(value, 200)
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isDirectConfirmation(value) {
-  const text = normalizeForIntent(value);
-  if (!text || text.length > 120) return false;
-
-  if (
-    /^(no|no gracias|no confirmo|cancelar|cancela|cancel|stop|detener)\b/.test(text)
-  ) {
-    return false;
-  }
-
-  return /^(si|yes|confirmo|confirm|confirmed|correcto|correct|de acuerdo|ok|okay|adelante|proceder|proceed)\b/.test(
-    text,
+function getReceivedSecret(request) {
+  return (
+    request.headers["x-webhook-secret"] ??
+    request.headers["x-internal-secret"] ??
+    request.body?.webhookSecret ??
+    request.query?.secret
   );
 }
 
-function safeJsonParse(value, fallback = null) {
-  if (value && typeof value === "object") return value;
-  if (typeof value !== "string" || !value.trim()) return fallback;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return fallback;
+function base64UrlEncode(value) {
+  return Buffer.from(value)
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+function getServiceAccount() {
+  const encoded = process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64;
+  if (!encoded) throw new Error("Google service account is not configured");
+  const serviceAccount = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+  if (!serviceAccount.client_email || !serviceAccount.private_key) {
+    throw new Error("Invalid Google service account configuration");
   }
+  return serviceAccount;
 }
 
-function defaultState() {
-  return {
-    active: false,
-    stage: "idle",
-    language: null,
-    customerName: null,
-    companyName: null,
-    propertyType: null,
-    projectAddress: null,
-    projectScope: null,
-    preferredDate: null,
-    preferredPeriod: null,
-    offeredSlots: [],
-    selectedStart: null,
-    selectedDisplay: null,
-    eventId: null,
-    updatedAt: new Date().toISOString(),
-  };
+function createGoogleJwt(serviceAccount) {
+  const now = Math.floor(Date.now() / 1000);
+  const header = base64UrlEncode(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const payload = base64UrlEncode(
+    JSON.stringify({
+      iss: serviceAccount.client_email,
+      scope: GOOGLE_SCOPE,
+      aud: GOOGLE_TOKEN_URL,
+      iat: now,
+      exp: now + 3600,
+    }),
+  );
+  const unsignedToken = `${header}.${payload}`;
+  const signer = createSign("RSA-SHA256");
+  signer.update(unsignedToken);
+  signer.end();
+  const signature = signer
+    .sign(createPrivateKey(serviceAccount.private_key))
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+  return `${unsignedToken}.${signature}`;
 }
 
-function normalizeState(value) {
-  const parsed = safeJsonParse(value, {});
-  return {
-    ...defaultState(),
-    ...(parsed && typeof parsed === "object" ? parsed : {}),
-    offeredSlots: Array.isArray(parsed?.offeredSlots) ? parsed.offeredSlots.slice(0, 3) : [],
-  };
+async function getGoogleAccessToken() {
+  const assertion = createGoogleJwt(getServiceAccount());
+  const tokenResponse = await fetch(GOOGLE_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion,
+    }),
+  });
+  if (!tokenResponse.ok) {
+    throw new Error(`Google authentication failed: ${tokenResponse.status}`);
+  }
+  const data = await tokenResponse.json();
+  if (!data.access_token) throw new Error("Google did not return an access token");
+  return data.access_token;
+}
+
+async function googleCalendarFetch(path, accessToken, options = {}) {
+  return fetch(`${GOOGLE_CALENDAR_API}${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+  });
 }
 
 async function zernioFetch(path, options = {}) {
@@ -95,834 +118,265 @@ async function zernioFetch(path, options = {}) {
   });
 }
 
-function normalizePhone(value) {
-  return String(value ?? "").replace(/\D/g, "");
-}
-
-async function resolveContactId(identifier) {
-  if (!identifier) return null;
-
-  const directResponse = await zernioFetch(
-    `/contacts/${encodeURIComponent(identifier)}`,
-  );
-
-  if (directResponse.ok) {
-    const directData = await directResponse.json();
-    return directData?.contact?.id ?? directData?.id ?? identifier;
-  }
-
-  const targetPhone = normalizePhone(identifier);
-  if (!targetPhone) return null;
-
-  const listResponse = await zernioFetch(
-    "/contacts?platform=whatsapp&limit=200",
-  );
-
-  if (!listResponse.ok) return null;
-
-  const listData = await listResponse.json();
-  const contacts = Array.isArray(listData?.contacts)
-    ? listData.contacts
-    : Array.isArray(listData?.data?.contacts)
-      ? listData.data.contacts
-      : Array.isArray(listData?.data)
-        ? listData.data
-        : [];
-
-  const contact = contacts.find((candidate) => {
-    const candidateNumbers = [
-      candidate?.phone,
-      candidate?.platformIdentifier,
-      candidate?.displayIdentifier,
-    ]
-      .map(normalizePhone)
-      .filter(Boolean);
-
-    return candidateNumbers.includes(targetPhone);
-  });
-
-  return contact?.id ?? contact?._id ?? null;
-}
-
-function extractContactIdentifier(body) {
-  return normalizeText(
-    body?.contactId ??
-      body?.contact?.id ??
-      body?.contact?._id ??
-      body?.contact?.contactId ??
-      body?.variables?.contactId ??
-      body?.variables?.contact?.id ??
-      body?.variables?.contact?._id ??
-      body?.vars?.contactId ??
-      body?.vars?.contact?.id ??
-      body?.contact?.phone ??
-      body?.contact?.platformIdentifier ??
-      body?.contact?.displayIdentifier,
-    200,
-  );
-}
-
-function extractConversationId(body) {
-  return normalizeText(
-    body?.conversationId ??
-      body?.event?.conversationId ??
-      body?.variables?.conversationId ??
-      body?.vars?.conversationId,
-    200,
-  );
-}
-
-function extractCurrentMessage(body) {
-  const transcript = normalizeText(
-    body?.voiceTranscript ??
-      body?.variables?.voiceInput?.body?.transcript ??
-      body?.variables?.voiceInput?.transcript ??
-      body?.vars?.voiceInput?.body?.transcript ??
-      body?.vars?.voiceInput?.transcript,
-  );
-  if (transcript) return transcript;
-
-  return normalizeText(
-    body?.messageText ??
-      body?.message?.body ??
-      body?.message?.text ??
-      body?.event?.message?.body ??
-      body?.event?.message?.text ??
-      body?.event?.message ??
-      body?.variables?.message?.body ??
-      body?.variables?.message?.text ??
-      body?.variables?.messageBody ??
-      body?.vars?.message?.body ??
-      body?.vars?.message?.text,
-  );
-}
-
-function extractMessages(data) {
-  const candidates = [data?.messages, data?.data?.messages, data?.data, data?.items];
-  return candidates.find(Array.isArray) ?? [];
-}
-
-function firstNonEmpty(...values) {
-  for (const value of values) {
-    const normalized = normalizeText(value, 1500);
-    if (normalized) return normalized;
-  }
-  return "";
-}
-
-function findNestedMessageText(value, depth = 0) {
-  if (value === null || value === undefined || depth > 7) return "";
-
-  if (typeof value === "string") {
-    return normalizeText(value, 1500);
-  }
-
-  if (Array.isArray(value)) {
-    for (const item of value.slice(0, 10)) {
-      const found = findNestedMessageText(item, depth + 1);
-      if (found) return found;
-    }
-    return "";
-  }
-
-  if (typeof value !== "object") return "";
-
-  const priorityKeys = [
-    "body",
-    "text",
-    "content",
-    "caption",
-    "messageText",
-    "transcript",
-    "message",
-    "payload",
-    "data",
-  ];
-
-  for (const key of priorityKeys) {
-    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
-    const found = findNestedMessageText(value[key], depth + 1);
-    if (found) return found;
-  }
-
-  return "";
-}
-
-function messageText(message) {
-  const directText = firstNonEmpty(
-    message?.body,
-    message?.text,
-    message?.content,
-    message?.caption,
-    message?.message?.body,
-    message?.message?.text,
-    message?.message?.content,
-    message?.payload?.body,
-    message?.payload?.text,
-    message?.data?.body,
-    message?.data?.text,
-  );
-
-  return directText || findNestedMessageText(message);
-}
-
-function messageIsInbound(message) {
-  const direction = String(
-    message?.direction ??
-      message?.messageDirection ??
-      message?.message?.direction ??
-      message?.type ??
-      "",
-  ).toLowerCase();
-
-  if (!direction) return null;
-  if (
-    direction.includes("inbound") ||
-    direction.includes("incoming") ||
-    direction === "received"
-  ) return true;
-  if (
-    direction.includes("outbound") ||
-    direction.includes("outgoing") ||
-    direction === "sent"
-  ) return false;
-  return null;
-}
-
-function collectContactIdentifiers(value, depth = 0, results = []) {
-  if (!value || typeof value !== "object" || depth > 6 || results.length >= 30) {
-    return results;
-  }
-
-  if (Array.isArray(value)) {
-    for (const item of value.slice(0, 20)) {
-      collectContactIdentifiers(item, depth + 1, results);
-    }
-    return results;
-  }
-
-  for (const [key, nestedValue] of Object.entries(value)) {
-    if (
-      /^(contactId|contact_id|waId|wa_id|phone|phoneNumber|platformIdentifier|displayIdentifier)$/i.test(key) &&
-      (typeof nestedValue === "string" || typeof nestedValue === "number")
-    ) {
-      const candidate = normalizeText(String(nestedValue), 200);
-      if (candidate && !results.includes(candidate)) results.push(candidate);
-    }
-
-    if (nestedValue && typeof nestedValue === "object") {
-      collectContactIdentifiers(nestedValue, depth + 1, results);
-    }
-
-    if (results.length >= 30) break;
-  }
-
-  return results;
-}
-
 function extractAccounts(data) {
   const candidates = [data?.accounts, data?.data?.accounts, data?.data, data?.items];
   return candidates.find(Array.isArray) ?? [];
 }
 
 async function resolveWhatsAppAccountId() {
-  const response = await zernioFetch("/accounts?platform=whatsapp");
-  if (!response.ok) return null;
-  const accounts = extractAccounts(await response.json()).filter(
+  const accountResponse = await zernioFetch(
+    "/accounts?platform=whatsapp&page=1&limit=100",
+  );
+  if (!accountResponse.ok) {
+    throw new Error(`WhatsApp account lookup failed: ${accountResponse.status}`);
+  }
+  const accounts = extractAccounts(await accountResponse.json()).filter(
     (account) => String(account?.platform ?? "").toLowerCase() === "whatsapp",
   );
   const selected =
     accounts.find((account) =>
-      ["active", "live", "connected"].includes(
-        String(account?.status ?? "").toLowerCase(),
-      ),
+      ["active", "live", "connected"].includes(String(account?.status ?? "").toLowerCase()),
     ) ?? accounts[0];
-  return selected?.id ?? selected?._id ?? selected?.accountId ?? null;
+  const accountId = selected?.id ?? selected?._id ?? selected?.accountId;
+  if (!accountId) throw new Error("No WhatsApp account is available");
+  return accountId;
 }
 
-function messageToHistoryLine(message) {
-  const text = messageText(message);
-  if (!text) return null;
-
-  const inbound = messageIsInbound(message);
-  const role = inbound === false ? "Assistant" : "Customer";
-  return `${role}: ${text}`;
-}
-
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-async function getConversationContext(conversationId) {
-  if (!conversationId) {
-    return { history: [], latestCustomerMessage: "", contactIdentifiers: [] };
-  }
-
-  const accountId = await resolveWhatsAppAccountId();
-  if (!accountId) throw new Error("WhatsApp account could not be resolved");
-
-  const path =
-    `/inbox/conversations/${encodeURIComponent(conversationId)}/messages` +
-    `?accountId=${encodeURIComponent(accountId)}&sortOrder=desc&limit=${MAX_HISTORY_MESSAGES}`;
-
-  let messages = [];
-  let payload = null;
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const messagesResponse = await zernioFetch(path);
-    if (!messagesResponse.ok) {
-      const upstreamBody = await messagesResponse.text();
-      throw new Error(
-        `Conversation message lookup failed: ${messagesResponse.status} ${upstreamBody.slice(0, 200)}`,
-      );
-    }
-
-    payload = await messagesResponse.json();
-    messages = extractMessages(payload);
-    if (messages.length) break;
-    if (attempt < 2) await delay(350 * (attempt + 1));
-  }
-
-  if (!messages.length) throw new Error("No conversation messages were returned");
-
-  const newestFirst = messages.slice();
-  const latestInbound =
-    newestFirst.find((message) => messageIsInbound(message) === true && messageText(message)) ??
-    newestFirst.find((message) => messageText(message));
-
-  return {
-    history: newestFirst
-      .slice()
-      .reverse()
-      .map(messageToHistoryLine)
-      .filter(Boolean),
-    latestCustomerMessage: latestInbound ? messageText(latestInbound) : "",
-    contactIdentifiers: collectContactIdentifiers({ payload, latestInbound }),
-  };
-}
-
-async function getContact(contactId) {
-  const response = await zernioFetch(`/contacts/${encodeURIComponent(contactId)}`);
-  if (!response.ok) throw new Error(`Contact lookup failed: ${response.status}`);
-  const data = await response.json();
-  return data?.contact ?? data;
-}
-
-function getCustomFields(contact) {
-  return contact?.customFields ?? contact?.metadata?.customFields ?? {};
-}
-
-function getContactPhone(contact) {
-  const candidates = [
-    contact?.phone,
-    contact?.phoneNumber,
-    contact?.platformIdentifier,
-    contact?.displayIdentifier,
-    contact?.metadata?.phone,
-  ];
-
-  for (const candidate of candidates) {
-    const normalized = normalizeText(
-      candidate === null || candidate === undefined ? "" : String(candidate),
-      100,
-    );
-    if (normalized) return normalized;
-  }
-
-  return "";
-}
-
-async function saveState(contactId, state) {
-  const value = JSON.stringify({ ...state, updatedAt: new Date().toISOString() });
-  const response = await zernioFetch(
-    `/contacts/${encodeURIComponent(contactId)}/fields/${BOOKING_FIELD_NAME}`,
-    { method: "PUT", body: JSON.stringify({ value }) },
-  );
-  if (!response.ok) throw new Error(`Booking state update failed: ${response.status}`);
-}
-
-function getBaseUrl(request) {
-  const forwardedHost = normalizeText(request.headers["x-forwarded-host"], 300);
-  const host = forwardedHost || normalizeText(request.headers.host, 300);
-  const forwardedProto = normalizeText(request.headers["x-forwarded-proto"], 20);
-  const protocol = forwardedProto || "https";
-  if (!host) throw new Error("Application host is missing");
-  return `${protocol}://${host}`;
-}
-
-async function internalPost(request, path, body) {
-  const response = await fetch(`${getBaseUrl(request)}${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-webhook-secret": process.env.INTERNAL_WEBHOOK_SECRET,
-    },
-    body: JSON.stringify(body),
-  });
-  const data = await response.json().catch(() => ({}));
-  return { ok: response.ok, status: response.status, data };
-}
-
-async function analyzeMessage({ currentMessage, history, state }) {
-  const systemPrompt = `You extract scheduling information for NEXT SOLUTIONS PARTNERS, a commercial general contractor in Dallas-Fort Worth.
-Return one JSON object only. Do not write customer-facing prose.
-
-Determine whether the customer's CURRENT message is related to requesting, selecting, confirming, changing, cancelling, or checking a commercial site-visit appointment.
-If booking state is already active, interpret short answers in that scheduling context.
-Extract only information actually stated or clearly established in the conversation. Never invent an address, name, date, time, property type, scope, company, or confirmation.
-Dates must be YYYY-MM-DD. Resolve relative dates using today's Central Time date: ${new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date())}.
-preferredPeriod must be morning, afternoon, or any.
-selectedOption must be 1, 2, or 3 only when the customer clearly chooses one of the offered options.
-explicitConfirmation is true only when the assistant previously presented a booking summary and the customer clearly approves it.
-cancelBooking is true only when the customer clearly cancels or stops the scheduling process.
-changeOrCancelExisting is true if the customer wants to change or cancel a request already submitted for team approval.
-
-Required JSON keys:
-{
-  "bookingRelated": boolean,
-  "language": "es" | "en",
-  "cancelBooking": boolean,
-  "changeOrCancelExisting": boolean,
-  "explicitConfirmation": boolean,
-  "selectedOption": number | null,
-  "customerName": string | null,
-  "companyName": string | null,
-  "propertyType": string | null,
-  "projectAddress": string | null,
-  "projectScope": string | null,
-  "preferredDate": string | null,
-  "preferredPeriod": "morning" | "afternoon" | "any" | null
-}`;
-
-  const userPrompt = JSON.stringify({
-    currentMessage,
-    existingBookingState: state,
-    recentConversation: history,
-  });
-
-  const response = await fetch(OPENAI_CHAT_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "gpt-4.1-mini",
-      temperature: 0,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-    }),
-  });
-
-  const data = await response.json();
-  if (!response.ok) throw new Error(`OpenAI booking analysis failed: ${response.status}`);
-  const content = data?.choices?.[0]?.message?.content;
-  const parsed = safeJsonParse(content, null);
-  if (!parsed) throw new Error("OpenAI booking analysis returned invalid JSON");
-  return parsed;
-}
-
-function applyUpdates(state, analysis) {
-  const next = { ...state };
-  const fields = [
-    "customerName",
-    "companyName",
-    "propertyType",
-    "projectAddress",
-    "projectScope",
-    "preferredDate",
-    "preferredPeriod",
-  ];
-  for (const field of fields) {
-    const value = normalizeText(analysis?.[field], field === "projectScope" ? 2000 : 500);
-    if (value) next[field] = value;
-  }
-  if (["es", "en"].includes(analysis?.language)) next.language = analysis.language;
-  return next;
-}
-
-function missingRequiredFields(state) {
-  const required = ["customerName", "propertyType", "projectAddress", "projectScope"];
-  return required.filter((field) => !normalizeText(state[field]));
-}
-
-function askForField(field, language) {
-  const es = {
-    customerName: "Para preparar la solicitud, ¿me indicas tu nombre?",
-    propertyType: "¿Qué tipo de propiedad o negocio comercial es? Por ejemplo, restaurante, oficina o tienda.",
-    projectAddress: "¿Cuál es la dirección completa de la propiedad comercial donde sería la visita? La necesito para poder solicitar la cita.",
-    projectScope: "¿Qué trabajo necesitas que revisemos durante la visita?",
-  };
-  const en = {
-    customerName: "To prepare the request, may I have your name?",
-    propertyType: "What type of commercial property or business is it, such as a restaurant, office, or retail store?",
-    projectAddress: "What is the complete address of the commercial property? I need it to request the appointment.",
-    projectScope: "What work would you like us to review during the visit?",
-  };
-  return (language === "es" ? es : en)[field];
-}
-
-function availabilityReply(options, language) {
-  const lines = options.map((option, index) => `${index + 1}. ${option.display}`);
-  return language === "es"
-    ? `Estos son los horarios disponibles más cercanos:\n\n${lines.join("\n")}\n\n¿Cuál prefieres: 1, 2 o 3?`
-    : `These are the closest available times:\n\n${lines.join("\n")}\n\nWhich do you prefer: 1, 2, or 3?`;
-}
-
-function formatSlotDisplay(startValue, language) {
-  const start = new Date(startValue);
-
-  if (Number.isNaN(start.getTime())) {
-    return normalizeText(startValue, 200);
-  }
-
+function formatDateTime(value, language) {
+  const date = new Date(value);
   const locale = language === "es" ? "es-US" : "en-US";
-
   const dateLabel = new Intl.DateTimeFormat(locale, {
-    timeZone: "America/Chicago",
+    timeZone: TIME_ZONE,
     weekday: "long",
     month: "long",
     day: "numeric",
-  }).format(start);
-
+    year: "numeric",
+  }).format(date);
   const timeLabel = new Intl.DateTimeFormat(locale, {
-    timeZone: "America/Chicago",
+    timeZone: TIME_ZONE,
     hour: "numeric",
     minute: "2-digit",
     hour12: true,
-  }).format(start);
-
+  }).format(date);
   return language === "es"
     ? `${dateLabel} a las ${timeLabel}, hora central`
     : `${dateLabel} at ${timeLabel} Central Time`;
 }
 
-function confirmationReply(state, language) {
-  if (language === "es") {
-    return `Antes de enviar la solicitud, confirma por favor estos datos:\n\nNombre: ${state.customerName}\nPropiedad: ${state.propertyType}\nDirección: ${state.projectAddress}\nTrabajo: ${state.projectScope}\nHorario solicitado: ${state.selectedDisplay}\n\nEste horario quedará pendiente de aprobación del equipo. ¿Confirmas que deseas enviar la solicitud?`;
+function notificationMessage({ action, language, customerName, start }) {
+  const when = formatDateTime(start, language);
+  if (action === "approve") {
+    return language === "es"
+      ? `Hola ${customerName}. Tu visita comercial con NEXT SOLUTIONS PARTNERS para ${when} ha sido confirmada. Si necesitas informarnos algún cambio, responde a este mensaje.`
+      : `Hello ${customerName}. Your commercial site visit with NEXT SOLUTIONS PARTNERS for ${when} has been confirmed. If you need to let us know about any changes, reply to this message.`;
   }
-  return `Before I submit the request, please confirm these details:\n\nName: ${state.customerName}\nProperty: ${state.propertyType}\nAddress: ${state.projectAddress}\nWork requested: ${state.projectScope}\nRequested time: ${state.selectedDisplay}\n\nThis time will remain pending team approval. Would you like me to submit the request?`;
+  return language === "es"
+    ? `Hola ${customerName}. No pudimos confirmar el horario solicitado para ${when}. Responde a este mensaje y te ayudaremos a revisar otra opción disponible.`
+    : `Hello ${customerName}. We could not confirm the requested time for ${when}. Reply to this message and we will help you review another available option.`;
 }
 
-function pendingReply(state, language) {
-  return language === "es"
-    ? `Tu solicitud para ${state.selectedDisplay} fue registrada y quedó pendiente de aprobación. El equipo de NEXT SOLUTIONS PARTNERS revisará los detalles antes de confirmar la visita.`
-    : `Your request for ${state.selectedDisplay} has been submitted and is pending approval. The NEXT SOLUTIONS PARTNERS team will review the details before confirming the visit.`;
+async function sendWhatsAppNotification({ conversationId, message, eventId, action }) {
+  if (!conversationId) {
+    return { sent: false, reason: "missing_conversation_id" };
+  }
+  if (!process.env.ZERNIO_API_KEY) {
+    return { sent: false, reason: "zernio_not_configured" };
+  }
+
+  const accountId = await resolveWhatsAppAccountId();
+  const idempotencyKey = createHash("sha256")
+    .update(`${eventId}|${action}|${message}`)
+    .digest("hex");
+  const sendResponse = await zernioFetch(
+    `/inbox/conversations/${encodeURIComponent(conversationId)}/messages`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ accountId, message }),
+    },
+  );
+
+  if (!sendResponse.ok) {
+    const errorBody = await sendResponse.text();
+    console.error("WhatsApp approval notification failed", {
+      status: sendResponse.status,
+      response: errorBody.slice(0, 300),
+    });
+    return {
+      sent: false,
+      reason: sendResponse.status === 422 ? "whatsapp_window_or_template_required" : "send_failed",
+      status: sendResponse.status,
+    };
+  }
+  return { sent: true };
+}
+
+function eventToPublicBooking(event) {
+  const privateData = event?.extendedProperties?.private ?? {};
+  return {
+    eventId: event.id,
+    status: privateData.bookingStatus ?? "pending_approval",
+    customerName: privateData.customerName || event.summary?.split("—").at(-1)?.trim() || "Customer",
+    whatsappNumber: privateData.whatsappNumber || "",
+    language: privateData.language === "es" ? "es" : "en",
+    location: event.location ?? "",
+    description: event.description ?? "",
+    start: event.start?.dateTime ?? event.start?.date ?? null,
+    end: event.end?.dateTime ?? event.end?.date ?? null,
+    eventLink: event.htmlLink ?? null,
+  };
+}
+
+async function listPendingApprovals(accessToken, calendarId) {
+  const query = new URLSearchParams({
+    timeMin: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    timeMax: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString(),
+    singleEvents: "true",
+    orderBy: "startTime",
+    privateExtendedProperty: "bookingStatus=pending_approval",
+    maxResults: "100",
+  });
+  const calendarResponse = await googleCalendarFetch(
+    `/calendars/${encodeURIComponent(calendarId)}/events?${query}`,
+    accessToken,
+  );
+  if (!calendarResponse.ok) {
+    throw new Error(`Pending event lookup failed: ${calendarResponse.status}`);
+  }
+  const data = await calendarResponse.json();
+  return (data.items ?? []).map(eventToPublicBooking);
+}
+
+function replaceStatusLine(description, statusLine) {
+  const text = normalizeText(description, 8000);
+  if (!text) return statusLine;
+  if (/^STATUS:.*$/m.test(text)) return text.replace(/^STATUS:.*$/m, statusLine);
+  return `${statusLine}\n\n${text}`;
+}
+
+async function updateApproval({ accessToken, calendarId, eventId, action }) {
+  const eventResponse = await googleCalendarFetch(
+    `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
+    accessToken,
+  );
+  if (eventResponse.status === 404) return { notFound: true };
+  if (!eventResponse.ok) {
+    throw new Error(`Calendar event lookup failed: ${eventResponse.status}`);
+  }
+
+  const event = await eventResponse.json();
+  const privateData = event.extendedProperties?.private ?? {};
+  const existingStatus = privateData.bookingStatus ?? "";
+  const targetStatus = action === "approve" ? "confirmed" : "declined";
+  if (existingStatus === targetStatus) {
+    return { event, alreadyProcessed: true, targetStatus };
+  }
+  if (existingStatus && existingStatus !== "pending_approval") {
+    return { conflict: true, existingStatus };
+  }
+
+  const customerName = privateData.customerName || event.summary?.split("—").at(-1)?.trim() || "Customer";
+  const summaryPrefix = action === "approve" ? "CONFIRMED" : "DECLINED";
+  const statusLine = action === "approve" ? "STATUS: CONFIRMED" : "STATUS: DECLINED";
+  const patchBody = {
+    status: "confirmed",
+    transparency: action === "approve" ? "opaque" : "transparent",
+    summary: `${summaryPrefix} — Commercial Site Visit — ${customerName}`,
+    description: replaceStatusLine(event.description, statusLine),
+    extendedProperties: {
+      ...event.extendedProperties,
+      private: {
+        ...privateData,
+        bookingStatus: targetStatus,
+        reviewedAt: new Date().toISOString(),
+      },
+    },
+  };
+
+  const patchResponse = await googleCalendarFetch(
+    `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=none`,
+    accessToken,
+    { method: "PATCH", body: JSON.stringify(patchBody) },
+  );
+  if (!patchResponse.ok) {
+    const body = await patchResponse.text();
+    throw new Error(`Calendar approval update failed: ${patchResponse.status} ${body.slice(0, 200)}`);
+  }
+  return { event: await patchResponse.json(), alreadyProcessed: false, targetStatus };
 }
 
 export default async function handler(request, response) {
   response.setHeader("Cache-Control", "no-store");
 
-  if (request.method !== "POST") {
-    response.setHeader("Allow", "POST");
-    return response.status(405).json({ ok: false, error: "Method not allowed" });
-  }
-
-  const receivedSecret =
-    request.headers["x-webhook-secret"] ??
-    request.body?.webhookSecret ??
-    request.query?.secret;
-
-  if (!secretsMatch(receivedSecret, process.env.INTERNAL_WEBHOOK_SECRET)) {
+  if (!secretsMatch(getReceivedSecret(request), process.env.INTERNAL_WEBHOOK_SECRET)) {
     return response.status(401).json({ ok: false, error: "Unauthorized" });
   }
-
-  if (!process.env.ZERNIO_API_KEY || !process.env.OPENAI_API_KEY) {
-    return response.status(500).json({ ok: false, error: "Server configuration error" });
-  }
-
-  const suppliedContactIdentifier = extractContactIdentifier(request.body);
-  const conversationId = extractConversationId(request.body);
-  const suppliedCurrentMessage = extractCurrentMessage(request.body);
-
-  if (!suppliedCurrentMessage && !conversationId) {
-    return response.status(400).json({
-      ok: false,
-      error: "A valid conversation or current message is required",
-    });
+  if (!process.env.GOOGLE_CALENDAR_ID) {
+    return response.status(500).json({ ok: false, error: "Google Calendar is not configured" });
   }
 
   try {
-    const conversationContext = conversationId
-      ? await getConversationContext(conversationId)
-      : { history: [], latestCustomerMessage: "", contactIdentifiers: [] };
+    const accessToken = await getGoogleAccessToken();
+    const calendarId = process.env.GOOGLE_CALENDAR_ID;
 
-    const currentMessage =
-      suppliedCurrentMessage || conversationContext.latestCustomerMessage;
-
-    let contactId = null;
-    const contactCandidates = [
-      suppliedContactIdentifier,
-      ...conversationContext.contactIdentifiers,
-    ].filter(Boolean);
-
-    for (const candidate of contactCandidates) {
-      contactId = await resolveContactId(candidate);
-      if (contactId) break;
+    if (request.method === "GET") {
+      const approvals = await listPendingApprovals(accessToken, calendarId);
+      return response.status(200).json({ ok: true, count: approvals.length, approvals });
     }
 
-    if (!contactId) {
-      return response.status(422).json({
+    if (request.method !== "POST") {
+      response.setHeader("Allow", "GET, POST");
+      return response.status(405).json({ ok: false, error: "Method not allowed" });
+    }
+
+    const eventId = normalizeText(request.body?.eventId, 300);
+    const action = normalizeText(request.body?.action, 20);
+    if (!eventId || !["approve", "decline"].includes(action)) {
+      return response.status(400).json({ ok: false, error: "A valid eventId and action are required" });
+    }
+
+    const result = await updateApproval({ accessToken, calendarId, eventId, action });
+    if (result.notFound) return response.status(404).json({ ok: false, error: "Event not found" });
+    if (result.conflict) {
+      return response.status(409).json({
         ok: false,
-        error: "The contact could not be resolved from the conversation",
+        error: "This request has already been processed",
+        status: result.existingStatus,
       });
     }
 
-    const contact = await getContact(contactId);
-    const history = conversationContext.history;
-    const effectiveCurrentMessage = currentMessage;
+    const event = result.event;
+    const privateData = event.extendedProperties?.private ?? {};
+    const language = privateData.language === "es" ? "es" : "en";
+    const customerName = privateData.customerName || event.summary?.split("—").at(-1)?.trim() || "Customer";
+    let notification = { sent: false, reason: "already_processed" };
 
-    if (!effectiveCurrentMessage) {
-      return response.status(422).json({
-        ok: false,
-        error: "The current message could not be retrieved",
-      });
-    }
-
-    const customFields = getCustomFields(contact);
-    let state = normalizeState(customFields?.[BOOKING_FIELD_NAME]);
-    const analysis = await analyzeMessage({
-      currentMessage: effectiveCurrentMessage,
-      history,
-      state,
-    });
-
-    const bookingContextActive = state.active || state.stage !== "idle";
-    if (!analysis.bookingRelated && !bookingContextActive) {
-      return response.status(200).json({ ok: true, handled: false, stage: "idle" });
-    }
-
-    if (!analysis.bookingRelated && state.stage === "pending_approval") {
-      return response.status(200).json({ ok: true, handled: false, stage: state.stage });
-    }
-
-    const language = analysis.language === "es" ? "es" : state.language === "es" ? "es" : "en";
-
-    if (analysis.changeOrCancelExisting && state.stage === "pending_approval") {
-      return response.status(200).json({
-        ok: true,
-        handled: true,
-        handoffRequired: true,
-        language,
-        reply:
-          language === "es"
-            ? "Para cambiar o cancelar una solicitud existente, un miembro del equipo debe ayudarte personalmente."
-            : "A team member must assist you personally to change or cancel an existing request.",
-        stage: state.stage,
-      });
-    }
-
-    if (analysis.cancelBooking) {
-      state = defaultState();
-      await saveState(contactId, state);
-      return response.status(200).json({
-        ok: true,
-        handled: true,
-        language,
-        reply:
-          language === "es"
-            ? "De acuerdo, cancelé el proceso de solicitud de visita. ¿Hay algo más sobre tu proyecto comercial en lo que pueda ayudarte?"
-            : "Okay, I stopped the site-visit request process. Is there anything else about your commercial project I can help with?",
-        stage: "idle",
-      });
-    }
-
-    state = applyUpdates({ ...state, active: true, language }, analysis);
-
-    if (
-      state.stage === "awaiting_slot_selection" &&
-      analysis.selectedOption &&
-      state.offeredSlots.length
-    ) {
-      const selected = state.offeredSlots[analysis.selectedOption - 1];
-      if (selected) {
-        state.selectedStart = selected.start;
-        state.selectedDisplay = selected.display;
-        state.stage = "collecting_details";
-      }
-    }
-
-    const confirmationReceived =
-      analysis.explicitConfirmation === true ||
-      isDirectConfirmation(effectiveCurrentMessage);
-
-    if (state.stage === "awaiting_confirmation" && confirmationReceived) {
-      const bookingResult = await internalPost(request, "/api/calendar-booking", {
-        customerName: state.customerName,
-        companyName: state.companyName,
-        propertyType: state.propertyType,
-        projectAddress: state.projectAddress,
-        projectScope: state.projectScope,
-        selectedStart: state.selectedStart,
-        contactIdentifier: contactId,
-        conversationId,
-        whatsappNumber: getContactPhone(contact),
-        language,
-      });
-
-      if (bookingResult.ok) {
-        state.stage = "pending_approval";
-        state.active = false;
-        state.eventId = bookingResult.data?.eventId ?? null;
-        await saveState(contactId, state);
-        return response.status(200).json({
-          ok: true,
-          handled: true,
-          bookingCreated: true,
+    if (!result.alreadyProcessed) {
+      notification = await sendWhatsAppNotification({
+        conversationId: privateData.conversationId,
+        message: notificationMessage({
+          action,
           language,
-          reply: pendingReply(state, language),
-          stage: state.stage,
-          eventId: state.eventId,
-        });
-      }
-
-      if (bookingResult.status === 409) {
-        state.selectedStart = null;
-        state.selectedDisplay = null;
-        state.offeredSlots = [];
-        state.stage = "collecting_preference";
-        await saveState(contactId, state);
-        return response.status(200).json({
-          ok: true,
-          handled: true,
-          language,
-          reply:
-            language === "es"
-              ? "Ese horario acaba de dejar de estar disponible. ¿Qué otra fecha prefieres para que revise nuevas opciones?"
-              : "That time is no longer available. What other date would you prefer so I can check new options?",
-          stage: state.stage,
-        });
-      }
-
-      throw new Error(`Booking creation failed: ${bookingResult.status}`);
-    }
-
-    if (state.selectedStart) {
-      const missing = missingRequiredFields(state);
-      if (missing.length) {
-        state.stage = "collecting_details";
-        await saveState(contactId, state);
-        return response.status(200).json({
-          ok: true,
-          handled: true,
-          language,
-          reply: askForField(missing[0], language),
-          stage: state.stage,
-          missingFields: missing,
-        });
-      }
-
-      state.stage = "awaiting_confirmation";
-      await saveState(contactId, state);
-      return response.status(200).json({
-        ok: true,
-        handled: true,
-        language,
-        reply: confirmationReply(state, language),
-        stage: state.stage,
+          customerName,
+          start: event.start?.dateTime ?? event.start?.date,
+        }),
+        eventId,
+        action,
       });
     }
-
-    const missingDetails = missingRequiredFields(state);
-    if (missingDetails.length) {
-      state.stage = "collecting_details";
-      await saveState(contactId, state);
-      return response.status(200).json({
-        ok: true,
-        handled: true,
-        language,
-        reply: askForField(missingDetails[0], language),
-        stage: state.stage,
-        missingFields: missingDetails,
-      });
-    }
-
-    if (!state.preferredDate) {
-      state.stage = "collecting_preference";
-      await saveState(contactId, state);
-      return response.status(200).json({
-        ok: true,
-        handled: true,
-        language,
-        reply:
-          language === "es"
-            ? "¿Qué fecha prefieres para la visita comercial?"
-            : "What date would you prefer for the commercial site visit?",
-        stage: state.stage,
-      });
-    }
-
-    if (!state.preferredPeriod) {
-      state.stage = "collecting_preference";
-      await saveState(contactId, state);
-      return response.status(200).json({
-        ok: true,
-        handled: true,
-        language,
-        reply:
-          language === "es"
-            ? "¿Prefieres la visita en la mañana o en la tarde?"
-            : "Would you prefer the visit in the morning or afternoon?",
-        stage: state.stage,
-      });
-    }
-
-    const availabilityResult = await internalPost(request, "/api/calendar-availability", {
-      preferredDate: state.preferredDate,
-      preferredPeriod: state.preferredPeriod,
-    });
-
-    if (!availabilityResult.ok) {
-      throw new Error(`Availability lookup failed: ${availabilityResult.status}`);
-    }
-
-    const options = Array.isArray(availabilityResult.data?.options)
-      ? availabilityResult.data.options.slice(0, 3)
-      : [];
-
-    if (!options.length) {
-      state.preferredDate = null;
-      state.preferredPeriod = null;
-      state.stage = "collecting_preference";
-      await saveState(contactId, state);
-      return response.status(200).json({
-        ok: true,
-        handled: true,
-        language,
-        reply:
-          language === "es"
-            ? "No encontré horarios disponibles cerca de esa fecha. ¿Qué otra fecha prefieres?"
-            : "I could not find availability near that date. What other date would you prefer?",
-        stage: state.stage,
-      });
-    }
-
-    state.offeredSlots = options.map((option) => ({
-      start: option.start,
-      end: option.end,
-      display: formatSlotDisplay(option.start, language),
-    }));
-    state.stage = "awaiting_slot_selection";
-    await saveState(contactId, state);
 
     return response.status(200).json({
       ok: true,
-      handled: true,
-      language,
-      reply: availabilityReply(state.offeredSlots, language),
-      stage: state.stage,
-      options: state.offeredSlots,
+      action,
+      bookingStatus: result.targetStatus,
+      alreadyProcessed: result.alreadyProcessed,
+      notification,
+      event: eventToPublicBooking(event),
     });
   } catch (error) {
-    console.error("Unexpected appointment coordinator error", {
+    console.error("Unexpected appointment approval error", {
       message: error instanceof Error ? error.message : "Unknown error",
     });
-    return response.status(502).json({
-      ok: false,
-      error: "Appointment coordination failed",
-    });
+    return response.status(502).json({ ok: false, error: "Appointment approval failed" });
   }
 }
