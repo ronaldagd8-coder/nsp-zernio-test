@@ -535,7 +535,8 @@ export default async function handler(request, response) {
     ].filter(Boolean);
 
     const event = {
-      summary: `Commercial Site Visit — ${customerName}`,
+  status: "tentative",
+  summary: `PENDING APPROVAL — Commercial Site Visit — ${customerName}`,
       location: projectAddress,
       description: descriptionLines.join("\n"),
       start: {
@@ -550,6 +551,7 @@ export default async function handler(request, response) {
         private: {
           bookingKey,
           source: "nsp_zernio_assistant",
+          bookingStatus: "pending_approval",
           contactIdentifier,
         },
       },
@@ -592,6 +594,8 @@ export default async function handler(request, response) {
     return response.status(201).json({
       ok: true,
       alreadyBooked: false,
+      bookingStatus: "pending_approval",
+      requiresTeamApproval: true,
       eventId: createdEvent.id,
       eventLink: createdEvent.htmlLink ?? null,
       start: start.toISOString(),
