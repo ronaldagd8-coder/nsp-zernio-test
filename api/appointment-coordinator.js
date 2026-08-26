@@ -712,7 +712,11 @@ export default async function handler(request, response) {
 
     state = applyUpdates({ ...state, active: true, language }, analysis);
 
-    if (analysis.selectedOption && state.offeredSlots.length) {
+    if (
+      state.stage === "awaiting_slot_selection" &&
+      analysis.selectedOption &&
+      state.offeredSlots.length
+    ) {
       const selected = state.offeredSlots[analysis.selectedOption - 1];
       if (selected) {
         state.selectedStart = selected.start;
@@ -792,7 +796,6 @@ export default async function handler(request, response) {
       await saveState(contactId, state);
       return response.status(200).json({
         ok: true,
-        debug: `READ=${normalizeText(effectiveCurrentMessage, 80)}|DIRECT=${isDirectConfirmation(effectiveCurrentMessage)}|AI=${analysis.explicitConfirmation === true}`,
         handled: true,
         language,
         reply: confirmationReply(state, language),
