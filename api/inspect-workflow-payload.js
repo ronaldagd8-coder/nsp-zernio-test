@@ -12,91 +12,54 @@ function secretsMatch(receivedSecret, expectedSecret) {
   );
 }
 
-function isObject(value) {
-  return value !== null && typeof value === "object";
-}
-
-function isRelevantKey(key) {
-  return /^(message|messageText|text|body|content|contact|contactId|conversation|conversationId|transcript|voice|voiceTranscript|audio|phone|identifier|platformIdentifier|displayIdentifier)$/i.test(
-    key,
-  );
-}
-
-function isSensitiveKey(key) {
-  return /(secret|token|authorization|password|api.?key)/i.test(key);
-}
-
-function safeValue(value) {
-  if (typeof value === "string") {
-    return value.slice(0, 200);
-  }
-
+function findTextCandidates(value, depth = 0, results = []) {
   if (
-    typeof value === "number" ||
-    typeof value === "boolean"
+    value === null ||
+    value === undefined ||
+    depth > 7 ||
+    results.length >= 5
   ) {
-    return value;
-  }
-
-  return null;
-}
-
-function findRelevantValues(
-  value,
-  currentPath = "body",
-  depth = 0,
-  findings = [],
-) {
-  if (depth > 7 || findings.length >= 15) {
-    return findings;
-  }
-
-  if (!isObject(value)) {
-    return findings;
+    return results;
   }
 
   if (Array.isArray(value)) {
-    value.slice(0, 5).forEach((item, index) => {
-      findRelevantValues(
-        item,
-        `${currentPath}[${index}]`,
-        depth + 1,
-        findings,
-      );
-    });
+    for (const item of value.slice(0, 5)) {
+      findTextCandidates(item, depth + 1, results);
+    }
 
-    return findings;
+    return results;
+  }
+
+  if (typeof value !== "object") {
+    return results;
   }
 
   for (const [key, nestedValue] of Object.entries(value)) {
-    if (isSensitiveKey(key)) continue;
-
-    const nextPath = `${currentPath}.${key}`;
-
-    if (!isObject(nestedValue) && isRelevantKey(key)) {
-      const cleanedValue = safeValue(nestedValue);
-
-      if (cleanedValue !== null && cleanedValue !== "") {
-        findings.push({
-          path: nextPath,
-          value: cleanedValue,
-        });
-      }
+    if (
+      /^(message|messageText|text|content|transcript|voiceTranscript)$/i.test(
+        key,
+      ) &&
+      typeof nestedValue === "string" &&
+      nestedValue.trim()
+    ) {
+      results.push(nestedValue.trim().slice(0, 160));
     }
 
-    if (isObject(nestedValue)) {
-      findRelevantValues(
+    if (
+      nestedValue &&
+      typeof nestedValue === "object"
+    ) {
+      findTextCandidates(
         nestedValue,
-        nextPath,
         depth + 1,
-        findings,
+        results,
       );
     }
 
-    if (findings.length >= 15) break;
+    if (results.length >= 5) break;
   }
 
-  return findings;
+  return results;
 }
 
 export default async function handler(request, response) {
@@ -129,20 +92,33 @@ export default async function handler(request, response) {
   }
 
   const body =
-    isObject(request.body) && !Array.isArray(request.body)
+    request.body &&
+    typeof request.body === "object" &&
+    !Array.isArray(request.body)
       ? request.body
       : {};
 
+  const conversationId =
+    body.conversationId ??
+    body.event?.conversationId ??
+    body.variables?.conversationId ??
+    null;
+
+  const contactId =
+    body.contactId ??
+    body.contact?.id ??
+    body.contact?._id ??
+    body.variables?.contactId ??
+    body.variables?.contact?.id ??
+    null;
+
+  const textCandidates = findTextCandidates(body);
+
   return response.status(200).json({
     ok: true,
-    findings: findRelevantValues(body),
-    variableKeys:
-      body.variables && isObject(body.variables)
-        ? Object.keys(body.variables).slice(0, 20)
-        : [],
-    contactKeys:
-      body.contact && isObject(body.contact)
-        ? Object.keys(body.contact).slice(0, 20)
-        : [],
+    message: textCandidates[0] ?? null,
+    contactId,
+    conversationId,
+    candidates: textCandidates,
   });
 }
