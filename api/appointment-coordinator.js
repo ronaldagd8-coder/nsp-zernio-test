@@ -64,6 +64,26 @@ function isEmojiOnlyMessage(value) {
   return remainder.length === 0;
 }
 
+function isCourtesyOnlyMessage(value) {
+  const text = normalizeForIntent(value).replace(/[.!?,]+$/g, "").trim();
+  if (!text || text.length > 80) return false;
+  return /^(gracias|muchas gracias|mil gracias|gracias por todo|perfecto gracias|ok gracias|thank you|thanks|thanks a lot|perfect thank you)$/.test(
+    text,
+  );
+}
+
+function isClearlyOutOfScopeService(value) {
+  const text = normalizeForIntent(value);
+  if (!text) return false;
+  return /\b(tapizar|tapizado|tapiceria|retapizar|upholster|upholstery|reupholster|reupholstery|reparar (una |varias )?sillas?|reparacion de (una |varias )?sillas?|repair (a |the )?chairs?|chair repair|reparar muebles?|reparacion de muebles?|furniture repair)\b/.test(
+    text,
+  );
+}
+
+function getFirstName(state) {
+  return normalizeText(state?.customerName, 120).split(/\s+/)[0] || "";
+}
+
 function safeJsonParse(value, fallback = null) {
   if (value && typeof value === "object") return value;
   if (typeof value !== "string" || !value.trim()) return fallback;
@@ -490,6 +510,8 @@ Return one JSON object only. Do not write customer-facing prose.
 Determine whether the customer's CURRENT message is related to requesting, selecting, confirming, changing, cancelling, or checking a commercial site-visit appointment.
 If booking state is already active, interpret short answers in that scheduling context.
 Extract only information actually stated or clearly established in the conversation. Never invent an address, name, date, time, property type, scope, company, or confirmation.
+NEXT SOLUTIONS PARTNERS handles commercial construction, renovation, tenant improvements, build-outs, and building-related trades such as electrical, plumbing, HVAC, drywall, painting, flooring, ceilings, doors, and related commercial repairs.
+Standalone furniture repair, chair repair, and upholstery are outside the company's scope. Do not treat an appointment request for an out-of-scope service as eligible for scheduling.
 Dates must be YYYY-MM-DD. Resolve relative dates using today's Central Time date: ${new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date())}.
 preferredPeriod must be morning, afternoon, or any.
 selectedOption must be 1, 2, or 3 only when the customer clearly chooses one of the offered options.
@@ -500,6 +522,7 @@ changeOrCancelExisting is true if the customer wants to change or cancel a reque
 Required JSON keys:
 {
   "bookingRelated": boolean,
+  "serviceInScope": boolean | null,
   "language": "es" | "en",
   "cancelBooking": boolean,
   "changeOrCancelExisting": boolean,
@@ -648,6 +671,8 @@ function applyExpectedFieldAnswer(state, analysis, currentMessage) {
 }
 
 function askForField(field, language, state = {}) {
+  const firstName = getFirstName(state);
+  const namePrefix = firstName ? `${firstName}, ` : "";
   const hasPartialAddress =
     field === "projectAddress" &&
     normalizeText(state.projectAddress, 500) &&
@@ -655,19 +680,19 @@ function askForField(field, language, state = {}) {
 
   const es = {
     customerName: "Para preparar la solicitud, ¿me indicas tu nombre?",
-    propertyType: "¿Qué tipo de propiedad o negocio comercial es? Por ejemplo, restaurante, oficina o tienda.",
+    propertyType: `${namePrefix}¿qué tipo de propiedad o negocio comercial es? Por ejemplo, restaurante, oficina o tienda.`,
     projectAddress: hasPartialAddress
-      ? "Gracias, ya tengo esa parte de la ubicación. Para completar la dirección, ¿cuál es el número y el nombre de la calle? Si tienes el código postal, inclúyelo también."
-      : "¿Cuál es la dirección física completa de la propiedad comercial? Incluye número, calle, ciudad, estado y código postal si lo tienes. Necesitamos la ubicación exacta para poder solicitar la visita.",
-    projectScope: "¿Qué trabajo necesitas que revisemos durante la visita?",
+      ? `Gracias${firstName ? `, ${firstName}` : ""}. Ya tengo ${normalizeText(state.projectAddress, 500)} como ubicación general. Para completar la dirección, ¿cuál es el número y el nombre de la calle? Si tienes el código postal, inclúyelo también.`
+      : `${namePrefix}¿cuál es la dirección física completa de la propiedad comercial? Incluye número, calle, ciudad, estado y código postal si lo tienes. Necesitamos la ubicación exacta para poder solicitar la visita.`,
+    projectScope: `${namePrefix}¿qué trabajo necesitas que revisemos durante la visita?`,
   };
   const en = {
     customerName: "To prepare the request, may I have your name?",
-    propertyType: "What type of commercial property or business is it, such as a restaurant, office, or retail store?",
+    propertyType: `${namePrefix}what type of commercial property or business is it, such as a restaurant, office, or retail store?`,
     projectAddress: hasPartialAddress
-      ? "Thank you, I have that part of the location. To complete the address, what are the street number and street name? Please include the ZIP code if available."
-      : "What is the complete physical address of the commercial property? Please include the street number, street name, city, state, and ZIP code if available. We need the exact location to request the visit.",
-    projectScope: "What work would you like us to review during the visit?",
+      ? `Thank you${firstName ? `, ${firstName}` : ""}. I have ${normalizeText(state.projectAddress, 500)} as the general location. To complete the address, what are the street number and street name? Please include the ZIP code if available.`
+      : `${namePrefix}what is the complete physical address of the commercial property? Please include the street number, street name, city, state, and ZIP code if available. We need the exact location to request the visit.`,
+    projectScope: `${namePrefix}what work would you like us to review during the visit?`,
   };
   return (language === "es" ? es : en)[field];
 }
@@ -896,11 +921,44 @@ export default async function handler(request, response) {
     );
 
     const bookingContextActive = state.active || state.stage !== "idle";
+
+    if (
+      state.stage === "idle" &&
+      (analysis.serviceInScope === false ||
+        isClearlyOutOfScopeService(effectiveCurrentMessage) ||
+        isClearlyOutOfScopeService(analysis.projectScope))
+    ) {
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        outOfScope: true,
+        language: analysis.language === "es" ? "es" : "en",
+        reply:
+          analysis.language === "es"
+            ? "Gracias por consultarnos. NEXT SOLUTIONS PARTNERS se especializa en construcción, remodelación y reparaciones de instalaciones comerciales, pero no ofrecemos reparación ni tapicería de muebles o sillas. Por eso no puedo programar una visita para ese servicio."
+            : "Thank you for checking with us. NEXT SOLUTIONS PARTNERS specializes in commercial construction, remodeling, and building-related repairs, but we do not provide furniture or chair repair and upholstery. For that reason, I cannot schedule a visit for this service.",
+        stage: "idle",
+      });
+    }
+
     if (!analysis.bookingRelated && !bookingContextActive) {
       return response.status(200).json({ ok: true, handled: false, stage: "idle" });
     }
 
     if (state.stage === "confirmed") {
+      const confirmedLanguage =
+        analysis.language === "es" ? "es" : state.language === "es" ? "es" : "en";
+
+      if (isCourtesyOnlyMessage(effectiveCurrentMessage)) {
+        return response.status(200).json({
+          ok: true,
+          handled: true,
+          language: confirmedLanguage,
+          reply: confirmedLanguage === "es" ? "Con gusto." : "You're welcome.",
+          stage: state.stage,
+        });
+      }
+
       if (!analysis.bookingRelated && !analysis.changeOrCancelExisting) {
         return response.status(200).json({
           ok: true,
@@ -909,8 +967,7 @@ export default async function handler(request, response) {
         });
       }
 
-      const confirmedLanguage =
-        analysis.language === "es" ? "es" : state.language === "es" ? "es" : "en";
+      const confirmedFirstName = getFirstName(state);
 
       return response.status(200).json({
         ok: true,
@@ -919,8 +976,8 @@ export default async function handler(request, response) {
         language: confirmedLanguage,
         reply:
           confirmedLanguage === "es"
-            ? "Tu visita ya está confirmada. Para cambiarla, cancelarla o solicitar otra visita, un miembro del equipo debe ayudarte personalmente."
-            : "Your site visit is already confirmed. A team member must assist you personally to change it, cancel it, or request another visit.",
+            ? `Entiendo${confirmedFirstName ? `, ${confirmedFirstName}` : ""}. Tu visita ya está confirmada. Un miembro del equipo te ayudará personalmente a corregirla, cambiarla o cancelarla.`
+            : `I understand${confirmedFirstName ? `, ${confirmedFirstName}` : ""}. Your site visit is already confirmed. A team member will personally help you correct, change, or cancel it.`,
         stage: state.stage,
       });
     }
@@ -930,6 +987,16 @@ export default async function handler(request, response) {
     }
 
     const language = analysis.language === "es" ? "es" : state.language === "es" ? "es" : "en";
+
+    if (state.stage === "pending_approval" && isCourtesyOnlyMessage(effectiveCurrentMessage)) {
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        language,
+        reply: language === "es" ? "Con gusto." : "You're welcome.",
+        stage: state.stage,
+      });
+    }
 
     if (analysis.changeOrCancelExisting && state.stage === "pending_approval") {
       return response.status(200).json({
@@ -949,12 +1016,11 @@ export default async function handler(request, response) {
       return response.status(200).json({
         ok: true,
         handled: true,
-        handoffRequired: true,
         language,
         reply:
           language === "es"
-            ? `Ya tienes una solicitud pendiente para ${state.selectedDisplay}. Para cambiarla o solicitar otra fecha, un miembro del equipo debe ayudarte personalmente.`
-            : `You already have a request pending for ${state.selectedDisplay}. A team member must assist you to change it or request another date.`,
+            ? `Tu solicitud para ${state.selectedDisplay} continúa pendiente de aprobación. Te avisaremos cuando el equipo la revise.`
+            : `Your request for ${state.selectedDisplay} is still pending approval. We will notify you after the team reviews it.`,
         stage: state.stage,
       });
     }
@@ -1130,8 +1196,8 @@ export default async function handler(request, response) {
         language,
         reply:
           language === "es"
-            ? "¿Qué fecha prefieres para la visita comercial?"
-            : "What date would you prefer for the commercial site visit?",
+            ? `${getFirstName(state) ? `${getFirstName(state)}, ` : ""}¿qué fecha prefieres para la visita comercial?`
+            : `${getFirstName(state) ? `${getFirstName(state)}, ` : ""}what date would you prefer for the commercial site visit?`,
         stage: state.stage,
       });
     }
@@ -1165,8 +1231,8 @@ export default async function handler(request, response) {
         language,
         reply:
           language === "es"
-            ? "¿Prefieres la visita en la mañana o en la tarde?"
-            : "Would you prefer the visit in the morning or afternoon?",
+            ? `${getFirstName(state) ? `${getFirstName(state)}, ` : ""}¿prefieres la visita en la mañana o en la tarde?`
+            : `${getFirstName(state) ? `${getFirstName(state)}, ` : ""}would you prefer the visit in the morning or afternoon?`,
         stage: state.stage,
       });
     }
