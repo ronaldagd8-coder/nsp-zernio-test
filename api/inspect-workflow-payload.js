@@ -16,19 +16,19 @@ function isObject(value) {
   return value !== null && typeof value === "object";
 }
 
-function isRelevantPath(path) {
-  return /(message|text|body|content|contact|conversation|transcript|voice|audio|phone|identifier)/i.test(
-    path,
+function isRelevantKey(key) {
+  return /^(message|messageText|text|body|content|contact|contactId|conversation|conversationId|transcript|voice|voiceTranscript|audio|phone|identifier|platformIdentifier|displayIdentifier)$/i.test(
+    key,
   );
 }
 
-function isSensitivePath(path) {
-  return /(secret|token|authorization|password|api.?key)/i.test(path);
+function isSensitiveKey(key) {
+  return /(secret|token|authorization|password|api.?key)/i.test(key);
 }
 
 function safeValue(value) {
   if (typeof value === "string") {
-    return value.slice(0, 180);
+    return value.slice(0, 200);
   }
 
   if (
@@ -47,29 +47,11 @@ function findRelevantValues(
   depth = 0,
   findings = [],
 ) {
-  if (depth > 6 || findings.length >= 20) {
+  if (depth > 7 || findings.length >= 15) {
     return findings;
   }
 
-  if (
-    value === null ||
-    value === undefined ||
-    typeof value !== "object"
-  ) {
-    if (
-      isRelevantPath(currentPath) &&
-      !isSensitivePath(currentPath)
-    ) {
-      const cleanedValue = safeValue(value);
-
-      if (cleanedValue !== null && cleanedValue !== "") {
-        findings.push({
-          path: currentPath,
-          value: cleanedValue,
-        });
-      }
-    }
-
+  if (!isObject(value)) {
     return findings;
   }
 
@@ -87,20 +69,31 @@ function findRelevantValues(
   }
 
   for (const [key, nestedValue] of Object.entries(value)) {
+    if (isSensitiveKey(key)) continue;
+
     const nextPath = `${currentPath}.${key}`;
 
-    if (isSensitivePath(nextPath)) {
-      continue;
+    if (!isObject(nestedValue) && isRelevantKey(key)) {
+      const cleanedValue = safeValue(nestedValue);
+
+      if (cleanedValue !== null && cleanedValue !== "") {
+        findings.push({
+          path: nextPath,
+          value: cleanedValue,
+        });
+      }
     }
 
-    findRelevantValues(
-      nestedValue,
-      nextPath,
-      depth + 1,
-      findings,
-    );
+    if (isObject(nestedValue)) {
+      findRelevantValues(
+        nestedValue,
+        nextPath,
+        depth + 1,
+        findings,
+      );
+    }
 
-    if (findings.length >= 20) break;
+    if (findings.length >= 15) break;
   }
 
   return findings;
@@ -140,18 +133,16 @@ export default async function handler(request, response) {
       ? request.body
       : {};
 
-  const findings = findRelevantValues(body);
-
   return response.status(200).json({
     ok: true,
-    findings,
+    findings: findRelevantValues(body),
     variableKeys:
-      body.variables && typeof body.variables === "object"
-        ? Object.keys(body.variables).slice(0, 30)
+      body.variables && isObject(body.variables)
+        ? Object.keys(body.variables).slice(0, 20)
         : [],
-    eventKeys:
-      body.event && typeof body.event === "object"
-        ? Object.keys(body.event).slice(0, 30)
+    contactKeys:
+      body.contact && isObject(body.contact)
+        ? Object.keys(body.contact).slice(0, 20)
         : [],
   });
 }
