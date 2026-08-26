@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 
 const ZERNIO_API_BASE_URL = "https://zernio.com/api/v1";
+const AI_PAUSE_DURATION_MS = 24 * 60 * 60 * 1000;
 
 function secretsMatch(receivedSecret, expectedSecret) {
   if (!receivedSecret || !expectedSecret) return false;
@@ -49,9 +50,7 @@ async function resolveContactId(identifier) {
     "/contacts?platform=whatsapp&limit=200",
   );
 
-  if (!listResponse.ok) {
-    return null;
-  }
+  if (!listResponse.ok) return null;
 
   const listData = await listResponse.json();
 
@@ -75,6 +74,7 @@ export default async function handler(request, response) {
 
   if (request.method !== "POST") {
     response.setHeader("Allow", "POST");
+
     return response.status(405).json({
       ok: false,
       error: "Method not allowed",
@@ -171,15 +171,81 @@ export default async function handler(request, response) {
     const data = await contactResponse.json();
     const contact = data?.contact ?? data;
 
-    const aiStatus =
-      contact?.customFields?.ai_status ??
-      contact?.metadata?.customFields?.ai_status ??
-      null;
+    const customFields =
+      contact?.customFields ??
+      contact?.metadata?.customFields ??
+      {};
+
+    const aiStatus = customFields?.ai_status ?? null;
+    const pausedAt = customFields?.ai_paused_at ?? null;
+
+    if (aiStatus === "human") {
+      const pausedAtMilliseconds = Date.parse(pausedAt);
+      const pausedAtIsValid = Number.isFinite(pausedAtMilliseconds);
+
+      if (pausedAtIsValid) {
+        const elapsedMilliseconds =
+          Date.now() - pausedAtMilliseconds;
+
+        if (elapsedMilliseconds >= AI_PAUSE_DURATION_MS) {
+          const activationResponse = await zernioFetch(
+            `/contacts/${encodeURIComponent(contactId)}/fields/ai_status`,
+            {
+              method: "PUT",
+              body: JSON.stringify({ value: "active" }),
+            },
+          );
+
+          if (!activationResponse.ok) {
+            console.error("Automatic AI reactivation failed", {
+              status: activationResponse.status,
+            });
+
+            return response.status(502).json({
+              ok: false,
+              error: "Automatic reactivation failed",
+            });
+          }
+
+          return response.status(200).json({
+            ok: true,
+            paused: false,
+            status: "active",
+            autoReactivated: true,
+            contactId,
+          });
+        }
+
+        const remainingMilliseconds =
+          AI_PAUSE_DURATION_MS - elapsedMilliseconds;
+
+        return response.status(200).json({
+          ok: true,
+          paused: true,
+          status: "human",
+          autoReactivated: false,
+          remainingMinutes: Math.ceil(
+            remainingMilliseconds / 60000,
+          ),
+          contactId,
+        });
+      }
+
+      return response.status(200).json({
+        ok: true,
+        paused: true,
+        status: "human",
+        autoReactivated: false,
+        reason: "Missing or invalid pause timestamp",
+        contactId,
+      });
+    }
 
     return response.status(200).json({
       ok: true,
-      paused: aiStatus === "human",
+      paused: false,
       status: aiStatus,
+      autoReactivated: false,
       contactId,
     });
   } catch (error) {
