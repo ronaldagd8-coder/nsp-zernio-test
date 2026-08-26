@@ -579,6 +579,37 @@ function missingRequiredFields(state) {
   return missing;
 }
 
+function applyExpectedFieldAnswer(state, analysis, currentMessage) {
+  const nextAnalysis = { ...analysis };
+  const answer = normalizeText(currentMessage, 500);
+  const expectedField = missingRequiredFields(state)[0] ?? null;
+
+  if (!answer || !expectedField) return nextAnalysis;
+
+  // When the assistant has just asked for a specific missing field, capture the
+  // customer's direct answer deterministically instead of relying only on the
+  // AI extractor. This prevents short valid replies such as "Restaurante" from
+  // being ignored and causing the same question to repeat.
+  if (
+    expectedField === "propertyType" &&
+    !normalizeText(nextAnalysis.propertyType) &&
+    answer.length <= 120 &&
+    isSpecificPropertyType(answer)
+  ) {
+    nextAnalysis.propertyType = answer;
+  }
+
+  if (
+    expectedField === "projectAddress" &&
+    !normalizeText(nextAnalysis.projectAddress) &&
+    isCompleteProjectAddress(answer)
+  ) {
+    nextAnalysis.projectAddress = answer;
+  }
+
+  return nextAnalysis;
+}
+
 function askForField(field, language) {
   const es = {
     customerName: "Para preparar la solicitud, ¿me indicas tu nombre?",
@@ -714,11 +745,17 @@ export default async function handler(request, response) {
 
     const customFields = getCustomFields(contact);
     let state = normalizeState(customFields?.[BOOKING_FIELD_NAME]);
-    const analysis = await analyzeMessage({
+    let analysis = await analyzeMessage({
       currentMessage: effectiveCurrentMessage,
       history,
       state,
     });
+
+    analysis = applyExpectedFieldAnswer(
+      state,
+      analysis,
+      effectiveCurrentMessage,
+    );
 
     const bookingContextActive = state.active || state.stage !== "idle";
     if (!analysis.bookingRelated && !bookingContextActive) {
