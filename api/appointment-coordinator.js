@@ -20,6 +20,30 @@ function normalizeText(value, maxLength = 2000) {
   return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
 }
 
+function normalizeForIntent(value) {
+  return normalizeText(value, 200)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isDirectConfirmation(value) {
+  const text = normalizeForIntent(value);
+  if (!text || text.length > 120) return false;
+
+  if (
+    /^(no|no gracias|no confirmo|cancelar|cancela|cancel|stop|detener)\b/.test(text)
+  ) {
+    return false;
+  }
+
+  return /^(si|yes|confirmo|confirm|confirmed|correcto|correct|de acuerdo|ok|okay|adelante|proceder|proceed)\b/.test(
+    text,
+  );
+}
+
 function safeJsonParse(value, fallback = null) {
   if (value && typeof value === "object") return value;
   if (typeof value !== "string" || !value.trim()) return fallback;
@@ -697,7 +721,11 @@ export default async function handler(request, response) {
       }
     }
 
-    if (state.stage === "awaiting_confirmation" && analysis.explicitConfirmation) {
+    const confirmationReceived =
+      analysis.explicitConfirmation === true ||
+      isDirectConfirmation(effectiveCurrentMessage);
+
+    if (state.stage === "awaiting_confirmation" && confirmationReceived) {
       const bookingResult = await internalPost(request, "/api/calendar-booking", {
         customerName: state.customerName,
         companyName: state.companyName,
