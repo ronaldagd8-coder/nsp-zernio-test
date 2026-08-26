@@ -132,25 +132,18 @@ export default async function handler(request, response) {
         code: data?.code ?? null,
       });
 
-      return response.status(502).json({
-        ok: false,
-        error: "Latest-message lookup failed",
-        upstreamStatus: messagesResponse.status,
-        upstreamError:
+            return response.status(502).json({
+        zernioError:
           typeof data?.error === "string"
             ? data.error.slice(0, 300)
-            : null,
-        upstreamCode:
+            : "Unknown Zernio error",
+        code:
           typeof data?.code === "string"
             ? data.code.slice(0, 100)
             : null,
-        upstreamParam:
+        param:
           typeof data?.param === "string"
             ? data.param.slice(0, 100)
-            : null,
-        upstreamPlatform:
-          typeof data?.platform === "string"
-            ? data.platform.slice(0, 100)
             : null,
       });
     }
