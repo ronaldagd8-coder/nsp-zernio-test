@@ -37,17 +37,29 @@ function base64UrlEncode(value) {
 }
 
 function getServiceAccount() {
-  const encoded = process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64;
+  const encoded =
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64;
 
   if (!encoded) {
-    throw new Error("Google service account is not configured");
+    throw new Error(
+      "Google service account is not configured",
+    );
   }
 
-  const decoded = Buffer.from(encoded, "base64").toString("utf8");
+  const decoded = Buffer.from(
+    encoded,
+    "base64",
+  ).toString("utf8");
+
   const serviceAccount = JSON.parse(decoded);
 
-  if (!serviceAccount.client_email || !serviceAccount.private_key) {
-    throw new Error("Invalid Google service account configuration");
+  if (
+    !serviceAccount.client_email ||
+    !serviceAccount.private_key
+  ) {
+    throw new Error(
+      "Invalid Google service account configuration",
+    );
   }
 
   return serviceAccount;
@@ -69,15 +81,24 @@ function createGoogleJwt(serviceAccount) {
     exp: now + 3600,
   };
 
-  const encodedHeader = base64UrlEncode(JSON.stringify(header));
-  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
-  const unsignedToken = `${encodedHeader}.${encodedPayload}`;
+  const encodedHeader = base64UrlEncode(
+    JSON.stringify(header),
+  );
+
+  const encodedPayload = base64UrlEncode(
+    JSON.stringify(payload),
+  );
+
+  const unsignedToken =
+    `${encodedHeader}.${encodedPayload}`;
 
   const signer = createSign("RSA-SHA256");
   signer.update(unsignedToken);
   signer.end();
 
-  const privateKey = createPrivateKey(serviceAccount.private_key);
+  const privateKey = createPrivateKey(
+    serviceAccount.private_key,
+  );
 
   const signature = signer
     .sign(privateKey)
@@ -93,16 +114,21 @@ async function getGoogleAccessToken() {
   const serviceAccount = getServiceAccount();
   const assertion = createGoogleJwt(serviceAccount);
 
-  const tokenResponse = await fetch(GOOGLE_TOKEN_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
+  const tokenResponse = await fetch(
+    GOOGLE_TOKEN_URL,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type":
+          "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        grant_type:
+          "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        assertion,
+      }),
     },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion,
-    }),
-  });
+  );
 
   if (!tokenResponse.ok) {
     throw new Error(
@@ -113,23 +139,28 @@ async function getGoogleAccessToken() {
   const tokenData = await tokenResponse.json();
 
   if (!tokenData.access_token) {
-    throw new Error("Google did not return an access token");
+    throw new Error(
+      "Google did not return an access token",
+    );
   }
 
   return tokenData.access_token;
 }
 
 function getLocalDateParts(date) {
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: TIME_ZONE,
-    weekday: "long",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  });
+  const formatter = new Intl.DateTimeFormat(
+    "en-US",
+    {
+      timeZone: TIME_ZONE,
+      weekday: "long",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    },
+  );
 
   const parts = formatter.formatToParts(date);
   const values = {};
@@ -156,31 +187,40 @@ function validateSelectedSlot(selectedStart) {
   if (Number.isNaN(start.getTime())) {
     return {
       valid: false,
-      error: "The selected appointment time is invalid",
+      error:
+        "The selected appointment time is invalid",
     };
   }
 
   const now = new Date();
 
   const earliestAllowed = new Date(
-    now.getTime() + MINIMUM_NOTICE_HOURS * 60 * 60 * 1000,
+    now.getTime() +
+      MINIMUM_NOTICE_HOURS * 60 * 60 * 1000,
   );
 
   const latestAllowed = new Date(
-    now.getTime() + MAXIMUM_ADVANCE_DAYS * 24 * 60 * 60 * 1000,
+    now.getTime() +
+      MAXIMUM_ADVANCE_DAYS *
+        24 *
+        60 *
+        60 *
+        1000,
   );
 
   if (start < earliestAllowed) {
     return {
       valid: false,
-      error: "Appointments require at least 24 hours of notice",
+      error:
+        "Appointments require at least 24 hours of notice",
     };
   }
 
   if (start > latestAllowed) {
     return {
       valid: false,
-      error: "Appointments can only be booked up to 30 days in advance",
+      error:
+        "Appointments can only be booked up to 30 days in advance",
     };
   }
 
@@ -197,7 +237,8 @@ function validateSelectedSlot(selectedStart) {
   if (!allowedWeekdays.includes(local.weekday)) {
     return {
       valid: false,
-      error: "Appointments are only available Monday through Friday",
+      error:
+        "Appointments are only available Monday through Friday",
     };
   }
 
@@ -207,7 +248,8 @@ function validateSelectedSlot(selectedStart) {
   ) {
     return {
       valid: false,
-      error: "The selected time is not an available appointment slot",
+      error:
+        "The selected time is not an available appointment slot",
     };
   }
 
@@ -218,10 +260,15 @@ function validateSelectedSlot(selectedStart) {
   };
 }
 
-function normalizeText(value, maximumLength = 1000) {
+function normalizeText(
+  value,
+  maximumLength = 1000,
+) {
   if (typeof value !== "string") return "";
 
-  return value.trim().slice(0, maximumLength);
+  return value
+    .trim()
+    .slice(0, maximumLength);
 }
 
 function normalizeEmail(value) {
@@ -229,9 +276,12 @@ function normalizeEmail(value) {
 
   if (!email) return "";
 
-  const basicEmailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const basicEmailPattern =
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-  return basicEmailPattern.test(email) ? email : null;
+  return basicEmailPattern.test(email)
+    ? email
+    : null;
 }
 
 function createBookingKey({
@@ -252,15 +302,19 @@ async function googleCalendarFetch(
   accessToken,
   options = {},
 ) {
-  return fetch(`${GOOGLE_CALENDAR_API}${path}`, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      ...options.headers,
+  return fetch(
+    `${GOOGLE_CALENDAR_API}${path}`,
+    {
+      ...options,
+      headers: {
+        Authorization:
+          `Bearer ${accessToken}`,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        ...options.headers,
+      },
     },
-  });
+  );
 }
 
 async function findExistingBooking({
@@ -272,27 +326,31 @@ async function findExistingBooking({
   const start = new Date(selectedStart);
 
   const timeMin = new Date(
-    start.getTime() - 24 * 60 * 60 * 1000,
+    start.getTime() -
+      24 * 60 * 60 * 1000,
   );
 
   const timeMax = new Date(
-    start.getTime() + 24 * 60 * 60 * 1000,
+    start.getTime() +
+      24 * 60 * 60 * 1000,
   );
 
   const query = new URLSearchParams({
     timeMin: timeMin.toISOString(),
     timeMax: timeMax.toISOString(),
     singleEvents: "true",
-    privateExtendedProperty: `bookingKey=${bookingKey}`,
+    privateExtendedProperty:
+      `bookingKey=${bookingKey}`,
     maxResults: "1",
   });
 
-  const existingResponse = await googleCalendarFetch(
-    `/calendars/${encodeURIComponent(
-      calendarId,
-    )}/events?${query.toString()}`,
-    accessToken,
-  );
+  const existingResponse =
+    await googleCalendarFetch(
+      `/calendars/${encodeURIComponent(
+        calendarId,
+      )}/events?${query.toString()}`,
+      accessToken,
+    );
 
   if (!existingResponse.ok) {
     throw new Error(
@@ -300,7 +358,8 @@ async function findExistingBooking({
     );
   }
 
-  const existingData = await existingResponse.json();
+  const existingData =
+    await existingResponse.json();
 
   return existingData.items?.[0] ?? null;
 }
@@ -312,26 +371,35 @@ async function checkSlotAvailability({
   end,
 }) {
   const bufferedStart = new Date(
-    start.getTime() - BUFFER_MINUTES * 60 * 1000,
+    start.getTime() -
+      BUFFER_MINUTES * 60 * 1000,
   );
 
   const bufferedEnd = new Date(
-    end.getTime() + BUFFER_MINUTES * 60 * 1000,
+    end.getTime() +
+      BUFFER_MINUTES * 60 * 1000,
   );
 
-  const freeBusyResponse = await googleCalendarFetch(
-    "/freeBusy",
-    accessToken,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        timeMin: bufferedStart.toISOString(),
-        timeMax: bufferedEnd.toISOString(),
-        timeZone: TIME_ZONE,
-        items: [{ id: calendarId }],
-      }),
-    },
-  );
+  const freeBusyResponse =
+    await googleCalendarFetch(
+      "/freeBusy",
+      accessToken,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          timeMin:
+            bufferedStart.toISOString(),
+          timeMax:
+            bufferedEnd.toISOString(),
+          timeZone: TIME_ZONE,
+          items: [
+            {
+              id: calendarId,
+            },
+          ],
+        }),
+      },
+    );
 
   if (!freeBusyResponse.ok) {
     throw new Error(
@@ -339,46 +407,71 @@ async function checkSlotAvailability({
     );
   }
 
-  const freeBusyData = await freeBusyResponse.json();
+  const freeBusyData =
+    await freeBusyResponse.json();
 
   const busyPeriods =
-    freeBusyData.calendars?.[calendarId]?.busy ?? [];
+    freeBusyData.calendars?.[
+      calendarId
+    ]?.busy ?? [];
 
-  const hasConflict = busyPeriods.some((period) => {
-    const busyStart = new Date(period.start);
-    const busyEnd = new Date(period.end);
+  const hasConflict =
+    busyPeriods.some((period) => {
+      const busyStart =
+        new Date(period.start);
 
-    return busyStart < bufferedEnd && busyEnd > bufferedStart;
-  });
+      const busyEnd =
+        new Date(period.end);
+
+      return (
+        busyStart < bufferedEnd &&
+        busyEnd > bufferedStart
+      );
+    });
 
   return !hasConflict;
 }
 
 function formatAppointment(start) {
-  const dateLabel = new Intl.DateTimeFormat("en-US", {
-    timeZone: TIME_ZONE,
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  }).format(start);
+  const dateLabel =
+    new Intl.DateTimeFormat(
+      "en-US",
+      {
+        timeZone: TIME_ZONE,
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+      },
+    ).format(start);
 
-  const timeLabel = new Intl.DateTimeFormat("en-US", {
-    timeZone: TIME_ZONE,
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true,
-  }).format(start);
+  const timeLabel =
+    new Intl.DateTimeFormat(
+      "en-US",
+      {
+        timeZone: TIME_ZONE,
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+      },
+    ).format(start);
 
   return {
     dateLabel,
     timeLabel,
-    display: `${dateLabel} at ${timeLabel} Central Time`,
+    display:
+      `${dateLabel} at ${timeLabel} Central Time`,
   };
 }
 
-export default async function handler(request, response) {
-  response.setHeader("Cache-Control", "no-store");
+export default async function handler(
+  request,
+  response,
+) {
+  response.setHeader(
+    "Cache-Control",
+    "no-store",
+  );
 
   if (request.method !== "POST") {
     response.setHeader("Allow", "POST");
@@ -409,7 +502,8 @@ export default async function handler(request, response) {
   if (!process.env.GOOGLE_CALENDAR_ID) {
     return response.status(500).json({
       ok: false,
-      error: "Google Calendar is not configured",
+      error:
+        "Google Calendar is not configured",
     });
   }
 
@@ -455,17 +549,14 @@ export default async function handler(request, response) {
       request.body?.contactIdentifier ??
       request.body?.contact?.id ??
       request.body?.contact?.phone ??
-      request.body?.booking?.contactIdentifier,
+      request.body?.booking
+        ?.contactIdentifier,
     200,
   );
 
   const email = normalizeEmail(
     request.body?.email ??
       request.body?.booking?.email,
-  );
-
-  const notificationEmail = normalizeEmail(
-    process.env.BOOKING_NOTIFICATION_EMAIL,
   );
 
   const missingFields = [];
@@ -491,13 +582,16 @@ export default async function handler(request, response) {
   }
 
   if (!contactIdentifier) {
-    missingFields.push("contactIdentifier");
+    missingFields.push(
+      "contactIdentifier",
+    );
   }
 
   if (missingFields.length > 0) {
     return response.status(400).json({
       ok: false,
-      error: "Required booking information is missing",
+      error:
+        "Required booking information is missing",
       missingFields,
     });
   }
@@ -505,18 +599,13 @@ export default async function handler(request, response) {
   if (email === null) {
     return response.status(400).json({
       ok: false,
-      error: "The email address is invalid",
+      error:
+        "The email address is invalid",
     });
   }
 
-  if (!notificationEmail) {
-    return response.status(500).json({
-      ok: false,
-      error: "Booking notification email is not configured",
-    });
-  }
-
-  const slotValidation = validateSelectedSlot(selectedStart);
+  const slotValidation =
+    validateSelectedSlot(selectedStart);
 
   if (!slotValidation.valid) {
     return response.status(400).json({
@@ -528,36 +617,51 @@ export default async function handler(request, response) {
   const start = slotValidation.start;
 
   const end = new Date(
-    start.getTime() + APPOINTMENT_MINUTES * 60 * 1000,
+    start.getTime() +
+      APPOINTMENT_MINUTES *
+        60 *
+        1000,
   );
 
-  const bookingKey = createBookingKey({
-    contactIdentifier,
-    selectedStart: start.toISOString(),
-    customerName,
-  });
-
-  try {
-    const accessToken = await getGoogleAccessToken();
-    const calendarId = process.env.GOOGLE_CALENDAR_ID;
-
-    const existingBooking = await findExistingBooking({
-      accessToken,
-      calendarId,
-      bookingKey,
-      selectedStart: start.toISOString(),
+  const bookingKey =
+    createBookingKey({
+      contactIdentifier,
+      selectedStart:
+        start.toISOString(),
+      customerName,
     });
 
+  try {
+    const accessToken =
+      await getGoogleAccessToken();
+
+    const calendarId =
+      process.env.GOOGLE_CALENDAR_ID;
+
+    const existingBooking =
+      await findExistingBooking({
+        accessToken,
+        calendarId,
+        bookingKey,
+        selectedStart:
+          start.toISOString(),
+      });
+
     if (existingBooking) {
-      const formatted = formatAppointment(start);
+      const formatted =
+        formatAppointment(start);
 
       return response.status(200).json({
         ok: true,
         alreadyBooked: true,
-        bookingStatus: "pending_approval",
+        bookingStatus:
+          "pending_approval",
         requiresTeamApproval: true,
-        eventId: existingBooking.id,
-        eventLink: existingBooking.htmlLink ?? null,
+        eventId:
+          existingBooking.id,
+        eventLink:
+          existingBooking.htmlLink ??
+          null,
         start: start.toISOString(),
         end: end.toISOString(),
         timeZone: TIME_ZONE,
@@ -565,12 +669,13 @@ export default async function handler(request, response) {
       });
     }
 
-    const slotIsAvailable = await checkSlotAvailability({
-      accessToken,
-      calendarId,
-      start,
-      end,
-    });
+    const slotIsAvailable =
+      await checkSlotAvailability({
+        accessToken,
+        calendarId,
+        start,
+        end,
+      });
 
     if (!slotIsAvailable) {
       return response.status(409).json({
@@ -585,12 +690,16 @@ export default async function handler(request, response) {
       "STATUS: PENDING TEAM APPROVAL",
       "",
       `Customer: ${customerName}`,
-      companyName ? `Company: ${companyName}` : null,
+      companyName
+        ? `Company: ${companyName}`
+        : null,
       `Property type: ${propertyType}`,
       `Project address: ${projectAddress}`,
       `Project scope: ${projectScope}`,
       `WhatsApp/Contact: ${contactIdentifier}`,
-      email ? `Customer email: ${email}` : null,
+      email
+        ? `Customer email: ${email}`
+        : null,
       "",
       "This time is being held provisionally.",
       "The appointment is not final until approved by the NEXT SOLUTIONS PARTNERS team.",
@@ -606,78 +715,90 @@ export default async function handler(request, response) {
 
       location: projectAddress,
 
-      description: descriptionLines.join("\n"),
+      description:
+        descriptionLines.join("\n"),
 
       start: {
-        dateTime: start.toISOString(),
+        dateTime:
+          start.toISOString(),
         timeZone: TIME_ZONE,
       },
 
       end: {
-        dateTime: end.toISOString(),
+        dateTime:
+          end.toISOString(),
         timeZone: TIME_ZONE,
       },
-
-      attendees: [
-        {
-          email: notificationEmail,
-          responseStatus: "needsAction",
-        },
-      ],
 
       extendedProperties: {
         private: {
           bookingKey,
-          source: "nsp_zernio_assistant",
-          bookingStatus: "pending_approval",
+          source:
+            "nsp_zernio_assistant",
+          bookingStatus:
+            "pending_approval",
           contactIdentifier,
-          customerEmail: email || "",
+          customerEmail:
+            email || "",
         },
       },
     };
 
-    const eventQuery = new URLSearchParams({
-      sendUpdates: "all",
-    });
+    const eventQuery =
+      new URLSearchParams({
+        sendUpdates: "none",
+      });
 
-    const createResponse = await googleCalendarFetch(
-      `/calendars/${encodeURIComponent(
-        calendarId,
-      )}/events?${eventQuery.toString()}`,
-      accessToken,
-      {
-        method: "POST",
-        body: JSON.stringify(event),
-      },
-    );
+    const createResponse =
+      await googleCalendarFetch(
+        `/calendars/${encodeURIComponent(
+          calendarId,
+        )}/events?${eventQuery.toString()}`,
+        accessToken,
+        {
+          method: "POST",
+          body: JSON.stringify(event),
+        },
+      );
 
     if (!createResponse.ok) {
-      const errorText = await createResponse.text();
+      const errorText =
+        await createResponse.text();
 
       console.error(
         "Google Calendar event creation failed",
         {
-          status: createResponse.status,
-          response: errorText.slice(0, 500),
+          status:
+            createResponse.status,
+          response:
+            errorText.slice(0, 500),
         },
       );
 
-      return response.status(502).json({
-        ok: false,
-        error: "The appointment request could not be created",
-      });
+      return response
+        .status(502)
+        .json({
+          ok: false,
+          error:
+            "The appointment request could not be created",
+        });
     }
 
-    const createdEvent = await createResponse.json();
-    const formatted = formatAppointment(start);
+    const createdEvent =
+      await createResponse.json();
+
+    const formatted =
+      formatAppointment(start);
 
     return response.status(201).json({
       ok: true,
       alreadyBooked: false,
-      bookingStatus: "pending_approval",
+      bookingStatus:
+        "pending_approval",
       requiresTeamApproval: true,
       eventId: createdEvent.id,
-      eventLink: createdEvent.htmlLink ?? null,
+      eventLink:
+        createdEvent.htmlLink ?? null,
       start: start.toISOString(),
       end: end.toISOString(),
       timeZone: TIME_ZONE,
@@ -686,16 +807,20 @@ export default async function handler(request, response) {
       ...formatted,
     });
   } catch (error) {
-    console.error("Unexpected calendar booking error", {
-      message:
-        error instanceof Error
-          ? error.message
-          : "Unknown calendar booking error",
-    });
+    console.error(
+      "Unexpected calendar booking error",
+      {
+        message:
+          error instanceof Error
+            ? error.message
+            : "Unknown calendar booking error",
+      },
+    );
 
     return response.status(502).json({
       ok: false,
-      error: "The appointment request could not be created",
+      error:
+        "The appointment request could not be created",
     });
   }
 }
