@@ -178,6 +178,84 @@ function extractMessages(data) {
   return candidates.find(Array.isArray) ?? [];
 }
 
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    const normalized = normalizeText(value, 1500);
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
+function messageText(message) {
+  return firstNonEmpty(
+    message?.body,
+    message?.text,
+    message?.content,
+    message?.caption,
+    message?.message?.body,
+    message?.message?.text,
+    message?.message?.content,
+    message?.payload?.body,
+    message?.payload?.text,
+    message?.data?.body,
+    message?.data?.text,
+  );
+}
+
+function messageIsInbound(message) {
+  const direction = String(
+    message?.direction ??
+      message?.messageDirection ??
+      message?.message?.direction ??
+      message?.type ??
+      "",
+  ).toLowerCase();
+
+  if (!direction) return null;
+  if (
+    direction.includes("inbound") ||
+    direction.includes("incoming") ||
+    direction === "received"
+  ) return true;
+  if (
+    direction.includes("outbound") ||
+    direction.includes("outgoing") ||
+    direction === "sent"
+  ) return false;
+  return null;
+}
+
+function collectContactIdentifiers(value, depth = 0, results = []) {
+  if (!value || typeof value !== "object" || depth > 6 || results.length >= 30) {
+    return results;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 20)) {
+      collectContactIdentifiers(item, depth + 1, results);
+    }
+    return results;
+  }
+
+  for (const [key, nestedValue] of Object.entries(value)) {
+    if (
+      /^(contactId|contact_id|waId|wa_id|phone|phoneNumber|platformIdentifier|displayIdentifier)$/i.test(key) &&
+      (typeof nestedValue === "string" || typeof nestedValue === "number")
+    ) {
+      const candidate = normalizeText(String(nestedValue), 200);
+      if (candidate && !results.includes(candidate)) results.push(candidate);
+    }
+
+    if (nestedValue && typeof nestedValue === "object") {
+      collectContactIdentifiers(nestedValue, depth + 1, results);
+    }
+
+    if (results.length >= 30) break;
+  }
+
+  return results;
+}
+
 function extractAccounts(data) {
   const candidates = [data?.accounts, data?.data?.accounts, data?.data, data?.items];
   return candidates.find(Array.isArray) ?? [];
@@ -199,38 +277,64 @@ async function resolveWhatsAppAccountId() {
 }
 
 function messageToHistoryLine(message) {
-  const text = normalizeText(
-    message?.body ?? message?.text ?? message?.message?.body ?? message?.message?.text,
-    1500,
-  );
+  const text = messageText(message);
   if (!text) return null;
 
-  const direction = String(
-    message?.direction ?? message?.messageDirection ?? message?.type ?? "",
-  ).toLowerCase();
-  const role =
-    direction.includes("inbound") ||
-    direction.includes("incoming") ||
-    direction === "received"
-      ? "Customer"
-      : "Assistant";
+  const inbound = messageIsInbound(message);
+  const role = inbound === false ? "Assistant" : "Customer";
   return `${role}: ${text}`;
 }
 
-async function getRecentConversation(conversationId) {
-  if (!conversationId) return [];
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function getConversationContext(conversationId) {
+  if (!conversationId) {
+    return { history: [], latestCustomerMessage: "", contactIdentifiers: [] };
+  }
+
   const accountId = await resolveWhatsAppAccountId();
-  if (!accountId) return [];
+  if (!accountId) throw new Error("WhatsApp account could not be resolved");
+
   const path =
     `/inbox/conversations/${encodeURIComponent(conversationId)}/messages` +
     `?accountId=${encodeURIComponent(accountId)}&sortOrder=desc&limit=${MAX_HISTORY_MESSAGES}`;
-  const response = await zernioFetch(path);
-  if (!response.ok) return [];
-  return extractMessages(await response.json())
-    .slice()
-    .reverse()
-    .map(messageToHistoryLine)
-    .filter(Boolean);
+
+  let messages = [];
+  let payload = null;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const messagesResponse = await zernioFetch(path);
+    if (!messagesResponse.ok) {
+      const upstreamBody = await messagesResponse.text();
+      throw new Error(
+        `Conversation message lookup failed: ${messagesResponse.status} ${upstreamBody.slice(0, 200)}`,
+      );
+    }
+
+    payload = await messagesResponse.json();
+    messages = extractMessages(payload);
+    if (messages.length) break;
+    if (attempt < 2) await delay(350 * (attempt + 1));
+  }
+
+  if (!messages.length) throw new Error("No conversation messages were returned");
+
+  const newestFirst = messages.slice();
+  const latestInbound =
+    newestFirst.find((message) => messageIsInbound(message) === true && messageText(message)) ??
+    newestFirst.find((message) => messageText(message));
+
+  return {
+    history: newestFirst
+      .slice()
+      .reverse()
+      .map(messageToHistoryLine)
+      .filter(Boolean),
+    latestCustomerMessage: latestInbound ? messageText(latestInbound) : "",
+    contactIdentifiers: collectContactIdentifiers({ payload, latestInbound }),
+  };
 }
 
 async function getContact(contactId) {
@@ -446,39 +550,46 @@ export default async function handler(request, response) {
     return response.status(500).json({ ok: false, error: "Server configuration error" });
   }
 
-  const contactIdentifier = extractContactIdentifier(request.body);
+  const suppliedContactIdentifier = extractContactIdentifier(request.body);
   const conversationId = extractConversationId(request.body);
-  const currentMessage = extractCurrentMessage(request.body);
+  const suppliedCurrentMessage = extractCurrentMessage(request.body);
 
-  if (!contactIdentifier || (!currentMessage && !conversationId)) {
+  if (!suppliedCurrentMessage && !conversationId) {
     return response.status(400).json({
       ok: false,
-      error: "A valid contact and current message are required",
-      hasContactId: Boolean(contactIdentifier),
-      hasCurrentMessage: Boolean(currentMessage),
+      error: "A valid conversation or current message is required",
     });
   }
 
   try {
-    const contactId = await resolveContactId(contactIdentifier);
+    const conversationContext = conversationId
+      ? await getConversationContext(conversationId)
+      : { history: [], latestCustomerMessage: "", contactIdentifiers: [] };
+
+    const currentMessage =
+      suppliedCurrentMessage || conversationContext.latestCustomerMessage;
+
+    let contactId = null;
+    const contactCandidates = [
+      suppliedContactIdentifier,
+      ...conversationContext.contactIdentifiers,
+    ].filter(Boolean);
+
+    for (const candidate of contactCandidates) {
+      contactId = await resolveContactId(candidate);
+      if (contactId) break;
+    }
 
     if (!contactId) {
-      return response.status(404).json({
+      return response.status(422).json({
         ok: false,
-        error: "Contact not found",
+        error: "The contact could not be resolved from the conversation",
       });
     }
 
-    const [contact, history] = await Promise.all([
-      getContact(contactId),
-      getRecentConversation(conversationId),
-    ]);
-
-    const latestHistoryMessage = normalizeText(
-      history.at(-1)?.replace(/^(Customer|Assistant):\s*/, ""),
-    );
-
-    const effectiveCurrentMessage = currentMessage || latestHistoryMessage;
+    const contact = await getContact(contactId);
+    const history = conversationContext.history;
+    const effectiveCurrentMessage = currentMessage;
 
     if (!effectiveCurrentMessage) {
       return response.status(422).json({
@@ -720,3 +831,4 @@ export default async function handler(request, response) {
     });
   }
 }
+
