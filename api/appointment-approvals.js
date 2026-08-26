@@ -254,6 +254,46 @@ function replaceStatusLine(description, statusLine) {
   return `${statusLine}\n\n${text}`;
 }
 
+function renderApprovalPage() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>NEXT SOLUTIONS PARTNERS — Appointment Approvals</title>
+  <style>
+    :root{color-scheme:dark;--bg:#090d16;--panel:#121927;--line:#263247;--text:#f5f7fb;--muted:#9ba8bd;--red:#ef4444;--green:#22c55e;--blue:#3b82f6;--amber:#f59e0b}
+    *{box-sizing:border-box}body{margin:0;background:linear-gradient(145deg,#080b12,#111827);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100vh}
+    main{width:min(1100px,calc(100% - 28px));margin:38px auto 80px}.top{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:24px}.brand{font-size:13px;letter-spacing:.15em;color:#93c5fd;font-weight:800}.title{font-size:clamp(27px,4vw,42px);margin:8px 0 7px}.subtitle{color:var(--muted);margin:0;max-width:700px;line-height:1.5}
+    .auth,.card,.empty,.notice{background:rgba(18,25,39,.94);border:1px solid var(--line);border-radius:18px;box-shadow:0 18px 50px rgba(0,0,0,.22)}.auth{padding:18px;display:grid;grid-template-columns:1fr auto;gap:12px;margin-bottom:22px}.auth input{width:100%;background:#090e18;color:var(--text);border:1px solid #334155;border-radius:11px;padding:12px 14px;font-size:15px}.button{border:0;border-radius:11px;padding:11px 16px;font-weight:750;color:white;cursor:pointer;font-size:14px}.button:disabled{opacity:.55;cursor:wait}.load{background:var(--blue)}.approve{background:var(--green)}.decline{background:var(--red)}.open{background:#334155;text-decoration:none;display:inline-flex;align-items:center}
+    .notice{padding:13px 16px;margin:0 0 18px;display:none;line-height:1.45}.notice.show{display:block}.notice.good{border-color:#166534;color:#bbf7d0}.notice.bad{border-color:#991b1b;color:#fecaca}.notice.warn{border-color:#92400e;color:#fde68a}
+    .count{color:var(--muted);font-size:14px;margin:0 0 12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,430px),1fr));gap:16px}.card{padding:20px}.badge{display:inline-block;background:rgba(245,158,11,.13);color:#fbbf24;border:1px solid rgba(245,158,11,.35);padding:5px 9px;border-radius:999px;font-size:12px;font-weight:800}.name{font-size:22px;font-weight:800;margin:14px 0 8px}.date{font-size:17px;color:#bfdbfe;margin-bottom:14px}.details{display:grid;gap:9px;margin:15px 0 18px}.row{display:grid;grid-template-columns:120px 1fr;gap:10px;font-size:14px;line-height:1.45}.label{color:var(--muted)}.value{overflow-wrap:anywhere}.actions{display:flex;gap:9px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:17px}.empty{padding:36px;text-align:center;color:var(--muted)}
+    @media(max-width:620px){main{margin-top:22px}.top{display:block}.auth{grid-template-columns:1fr}.row{grid-template-columns:1fr;gap:2px}.actions .button,.actions .open{flex:1;justify-content:center}}
+  </style>
+</head>
+<body>
+<main>
+  <div class="top"><div><div class="brand">NEXT SOLUTIONS PARTNERS</div><h1 class="title">Appointment approvals</h1><p class="subtitle">Review pending commercial site-visit requests. Approval is not final until you authorize it here.</p></div></div>
+  <section class="auth"><input id="secret" type="password" autocomplete="current-password" placeholder="Internal webhook secret" /><button id="load" class="button load">Load requests</button></section>
+  <div id="notice" class="notice"></div><p id="count" class="count"></p><section id="list" class="grid"></section>
+</main>
+<script>
+  const secretInput=document.getElementById('secret');const loadButton=document.getElementById('load');const list=document.getElementById('list');const count=document.getElementById('count');const notice=document.getElementById('notice');
+  function showNotice(message,type='good'){notice.textContent=message;notice.className='notice show '+type}
+  function clearNotice(){notice.textContent='';notice.className='notice'}
+  function detail(label,value){const row=document.createElement('div');row.className='row';const l=document.createElement('div');l.className='label';l.textContent=label;const v=document.createElement('div');v.className='value';v.textContent=value||'—';row.append(l,v);return row}
+  function formatDate(value,language){if(!value)return '—';return new Intl.DateTimeFormat(language==='es'?'es-US':'en-US',{timeZone:'America/Chicago',weekday:'long',month:'long',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}).format(new Date(value))+' CT'}
+  async function request(path,options={}){const secret=secretInput.value.trim();if(!secret)throw new Error('Enter the internal webhook secret.');const response=await fetch(path,{...options,headers:{'Content-Type':'application/json','x-internal-secret':secret,...options.headers}});const data=await response.json().catch(()=>({ok:false,error:'Invalid server response'}));if(!response.ok)throw new Error(data.error||('Request failed: '+response.status));return data}
+  function bookingCard(item){const card=document.createElement('article');card.className='card';const badge=document.createElement('span');badge.className='badge';badge.textContent='PENDING APPROVAL';const name=document.createElement('div');name.className='name';name.textContent=item.customerName||'Customer';const date=document.createElement('div');date.className='date';date.textContent=formatDate(item.start,item.language);const details=document.createElement('div');details.className='details';details.append(detail('Location',item.location),detail('WhatsApp',item.whatsappNumber||'Not stored in this event'),detail('Language',item.language==='es'?'Spanish':'English'));
+    const actions=document.createElement('div');actions.className='actions';const approve=document.createElement('button');approve.className='button approve';approve.textContent='Approve';approve.onclick=()=>process(item,'approve',approve);const decline=document.createElement('button');decline.className='button decline';decline.textContent='Decline';decline.onclick=()=>process(item,'decline',decline);actions.append(approve,decline);if(item.eventLink){const open=document.createElement('a');open.className='button open';open.textContent='Open Calendar';open.href=item.eventLink;open.target='_blank';open.rel='noopener';actions.append(open)}card.append(badge,name,date,details,actions);return card}
+  async function load(){clearNotice();loadButton.disabled=true;list.innerHTML='';count.textContent='Loading…';try{const data=await request('/api/appointment-approvals');count.textContent=data.count+' pending request'+(data.count===1?'':'s');if(!data.approvals.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='There are no pending appointment requests.';list.append(empty)}else data.approvals.forEach(item=>list.append(bookingCard(item)))}catch(error){count.textContent='';showNotice(error.message,'bad')}finally{loadButton.disabled=false}}
+  async function process(item,action,button){const verb=action==='approve'?'approve':'decline';if(!confirm('Are you sure you want to '+verb+' this appointment request?'))return;clearNotice();button.disabled=true;try{const data=await request('/api/appointment-approvals',{method:'POST',body:JSON.stringify({eventId:item.eventId,action})});if(data.notification?.sent){showNotice('Appointment '+data.bookingStatus+'. The WhatsApp notification was sent.','good')}else{const reason=data.notification?.reason;const text=reason==='missing_conversation_id'?'Calendar was updated, but this older event does not contain a WhatsApp conversation ID. Notify the customer manually.':reason==='whatsapp_window_or_template_required'?'Calendar was updated, but WhatsApp could not send a free-form message outside the 24-hour window. Notify the customer manually or use an approved template.':'Calendar was updated, but the WhatsApp notification was not delivered. Review Zernio before contacting the customer.';showNotice(text,'warn')}await load()}catch(error){showNotice(error.message,'bad');button.disabled=false}}
+  loadButton.addEventListener('click',load);secretInput.addEventListener('keydown',event=>{if(event.key==='Enter')load()});
+</script>
+</body>
+</html>`;
+}
+
 async function updateApproval({ accessToken, calendarId, eventId, action }) {
   const eventResponse = await googleCalendarFetch(
     `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
@@ -307,6 +347,11 @@ async function updateApproval({ accessToken, calendarId, eventId, action }) {
 
 export default async function handler(request, response) {
   response.setHeader("Cache-Control", "no-store");
+
+  if (request.method === "GET" && request.query?.view === "page") {
+    response.setHeader("Content-Type", "text/html; charset=utf-8");
+    return response.status(200).send(renderApprovalPage());
+  }
 
   if (!secretsMatch(getReceivedSecret(request), process.env.INTERNAL_WEBHOOK_SECRET)) {
     return response.status(401).json({ ok: false, error: "Unauthorized" });
