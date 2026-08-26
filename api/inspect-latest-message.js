@@ -16,18 +16,6 @@ function secretsMatch(receivedSecret, expectedSecret) {
   );
 }
 
-function safeUrlPath(value) {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  try {
-    return new URL(value).pathname;
-  } catch {
-    return null;
-  }
-}
-
 function extractMessages(data) {
   const candidates = [
     data?.messages,
@@ -162,12 +150,14 @@ export default async function handler(request, response) {
       });
     }
 
+    const messagesUrl =
+      `${ZERNIO_API_BASE_URL}/inbox/conversations/` +
+      `${encodeURIComponent(conversationId.trim())}/messages` +
+      `?accountId=${encodeURIComponent(accountId)}` +
+      `&sortOrder=desc&limit=1`;
+
     const messagesResponse = await fetch(
-      `${ZERNIO_API_BASE_URL}/inbox/conversations/${encodeURIComponent(
-        conversationId.trim(),
-      )}/messages?accountId=${encodeURIComponent(
-        accountId,
-      )}&sortOrder=desc&limit=1`,
+      messagesUrl,
       {
         headers: {
           Authorization: `Bearer ${process.env.ZERNIO_API_KEY}`,
@@ -211,15 +201,6 @@ export default async function handler(request, response) {
       return response.status(404).json({
         ok: false,
         error: "No message was returned",
-        responseKeys:
-          data && typeof data === "object"
-            ? Object.keys(data).slice(0, 20)
-            : [],
-        dataKeys:
-          data?.data &&
-          typeof data.data === "object"
-            ? Object.keys(data.data).slice(0, 20)
-            : [],
       });
     }
 
@@ -229,43 +210,28 @@ export default async function handler(request, response) {
       ? latestMessage.attachments
       : [];
 
+    const firstAttachment =
+      attachments[0] ?? null;
+
     return response.status(200).json({
       ok: true,
-      messageId:
-        latestMessage?.id ??
-        latestMessage?.messageId ??
-        latestMessage?.platformMessageId ??
-        null,
-      direction:
-        latestMessage?.direction ?? null,
-      type:
-        latestMessage?.type ??
-        latestMessage?.messageType ??
-        null,
       attachmentCount: attachments.length,
-      attachments: attachments
-        .slice(0, 5)
-        .map((attachment) => ({
-          type: attachment?.type ?? null,
-          mimeType:
-            attachment?.mimeType ??
-            attachment?.mimetype ??
-            null,
-          mediaId:
-            attachment?.payload?.id ??
-            attachment?.mediaId ??
-            attachment?.id ??
-            null,
-          payloadKeys:
-            attachment?.payload &&
-            typeof attachment.payload === "object"
-              ? Object.keys(
-                  attachment.payload,
-                ).slice(0, 20)
-              : [],
-          urlPath:
-            safeUrlPath(attachment?.url),
-        })),
+      attachmentType:
+        firstAttachment?.type ?? null,
+      mimeType:
+        firstAttachment?.mimeType ??
+        firstAttachment?.mimetype ??
+        null,
+      hasMediaId: Boolean(
+        firstAttachment?.payload?.id ??
+        firstAttachment?.mediaId ??
+        firstAttachment?.id,
+      ),
+      mediaId:
+        firstAttachment?.payload?.id ??
+        firstAttachment?.mediaId ??
+        firstAttachment?.id ??
+        null,
     });
   } catch (error) {
     console.error(
