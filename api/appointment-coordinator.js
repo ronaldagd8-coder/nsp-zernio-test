@@ -52,6 +52,21 @@ function isDirectRejection(value) {
   );
 }
 
+function isExplicitBookingCancellation(value) {
+  const text = normalizeForIntent(value);
+  if (!text || text.length > 300) return false;
+  return /\b(cancela(r)? (eso|la cita|la visita|la solicitud|la reserva)|cancelar (eso|la cita|la visita|la solicitud|la reserva)|olvida (eso|la cita|la visita|la solicitud|la reserva)|cancel (that|the appointment|the visit|the request|the booking)|forget (that|the appointment|the visit|the request|the booking))\b/.test(
+    text,
+  );
+}
+
+function asksToAddressAnotherQuestion(value) {
+  const text = normalizeForIntent(value);
+  return /\b(respondeme (la|esa|mi) pregunta|contesta(me)? (la|esa|mi) pregunta|primero (dime|respondeme|contesta)|answer (the|that|my) question|first (tell me|answer))\b/.test(
+    text,
+  );
+}
+
 function isEmojiOnlyMessage(value) {
   const text = normalizeText(value, 500);
   if (!text) return false;
@@ -518,6 +533,7 @@ selectedOption must be 1, 2, or 3 only when the customer clearly chooses one of 
 explicitConfirmation is true only when the assistant previously presented a booking summary and the customer clearly approves it.
 cancelBooking is true only when the customer clearly cancels or stops the scheduling process.
 changeOrCancelExisting is true if the customer wants to change or cancel a request already submitted for team approval.
+separateProjectQuestion is true when the CURRENT message asks a company, service, construction, property, or project question that is separate from answering the pending scheduling question. A booking state being active does not by itself make a separate project question booking-related.
 
 Required JSON keys:
 {
@@ -526,6 +542,7 @@ Required JSON keys:
   "language": "es" | "en",
   "cancelBooking": boolean,
   "changeOrCancelExisting": boolean,
+  "separateProjectQuestion": boolean,
   "explicitConfirmation": boolean,
   "selectedOption": number | null,
   "customerName": string | null,
@@ -815,16 +832,22 @@ function formatSlotDisplay(startValue, language) {
 }
 
 function confirmationReply(state, language) {
+  const selectedDisplay = state.selectedStart
+    ? formatSlotDisplay(state.selectedStart, language)
+    : state.selectedDisplay;
   if (language === "es") {
-    return `Antes de enviar la solicitud, confirma por favor estos datos:\n\nNombre: ${state.customerName}\nPropiedad: ${state.propertyType}\nDirección: ${state.projectAddress}\nTrabajo: ${state.projectScope}\nHorario solicitado: ${state.selectedDisplay}\n\nEste horario quedará pendiente de aprobación del equipo. ¿Confirmas que deseas enviar la solicitud?`;
+    return `Antes de enviar la solicitud, confirma por favor estos datos:\n\nNombre: ${state.customerName}\nPropiedad: ${state.propertyType}\nDirección: ${state.projectAddress}\nTrabajo: ${state.projectScope}\nHorario solicitado: ${selectedDisplay}\n\nEste horario quedará pendiente de aprobación del equipo. ¿Confirmas que deseas enviar la solicitud?`;
   }
-  return `Before I submit the request, please confirm these details:\n\nName: ${state.customerName}\nProperty: ${state.propertyType}\nAddress: ${state.projectAddress}\nWork requested: ${state.projectScope}\nRequested time: ${state.selectedDisplay}\n\nThis time will remain pending team approval. Would you like me to submit the request?`;
+  return `Before I submit the request, please confirm these details:\n\nName: ${state.customerName}\nProperty: ${state.propertyType}\nAddress: ${state.projectAddress}\nWork requested: ${state.projectScope}\nRequested time: ${selectedDisplay}\n\nThis time will remain pending team approval. Would you like me to submit the request?`;
 }
 
 function pendingReply(state, language) {
+  const selectedDisplay = state.selectedStart
+    ? formatSlotDisplay(state.selectedStart, language)
+    : state.selectedDisplay;
   return language === "es"
-    ? `Tu solicitud para ${state.selectedDisplay} fue registrada y quedó pendiente de aprobación. El equipo de NEXT SOLUTIONS PARTNERS revisará los detalles antes de confirmar la visita.`
-    : `Your request for ${state.selectedDisplay} has been submitted and is pending approval. The NEXT SOLUTIONS PARTNERS team will review the details before confirming the visit.`;
+    ? `Tu solicitud para ${selectedDisplay} fue registrada y quedó pendiente de aprobación. El equipo de NEXT SOLUTIONS PARTNERS revisará los detalles antes de confirmar la visita.`
+    : `Your request for ${selectedDisplay} has been submitted and is pending approval. The NEXT SOLUTIONS PARTNERS team will review the details before confirming the visit.`;
 }
 
 export default async function handler(request, response) {
@@ -987,6 +1010,28 @@ export default async function handler(request, response) {
     }
 
     const language = analysis.language === "es" ? "es" : state.language === "es" ? "es" : "en";
+
+    if (
+      state.stage === "awaiting_confirmation" &&
+      (analysis.separateProjectQuestion === true ||
+        asksToAddressAnotherQuestion(effectiveCurrentMessage))
+    ) {
+      const shouldCancelDraft =
+        analysis.cancelBooking === true ||
+        isExplicitBookingCancellation(effectiveCurrentMessage);
+
+      if (shouldCancelDraft) {
+        state = defaultState();
+        await saveState(contactId, state);
+      }
+
+      return response.status(200).json({
+        ok: true,
+        handled: false,
+        bookingDraftPreserved: !shouldCancelDraft,
+        stage: shouldCancelDraft ? "idle" : "awaiting_confirmation",
+      });
+    }
 
     if (state.stage === "pending_approval" && isCourtesyOnlyMessage(effectiveCurrentMessage)) {
       return response.status(200).json({
