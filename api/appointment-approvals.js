@@ -211,6 +211,84 @@ async function sendWhatsAppNotification({ conversationId, message, eventId, acti
   return { sent: true };
 }
 
+function safeJsonParse(value, fallback = null) {
+  if (value && typeof value === "object") return value;
+  if (typeof value !== "string" || !value.trim()) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+async function syncContactBookingState({
+  contactIdentifier,
+  action,
+  eventId,
+  language,
+}) {
+  if (!contactIdentifier || !process.env.ZERNIO_API_KEY) {
+    return { updated: false, reason: "missing_contact" };
+  }
+
+  const contactResponse = await zernioFetch(
+    `/contacts/${encodeURIComponent(contactIdentifier)}`,
+  );
+  if (!contactResponse.ok) {
+    return { updated: false, reason: "contact_lookup_failed" };
+  }
+
+  const contactData = await contactResponse.json();
+  const contact = contactData?.contact ?? contactData;
+  const customFields = contact?.customFields ?? contact?.metadata?.customFields ?? {};
+  const currentState = safeJsonParse(customFields?.booking_state, {}) ?? {};
+
+  const nextState =
+    action === "approve"
+      ? {
+          ...currentState,
+          active: false,
+          stage: "confirmed",
+          language: language === "es" ? "es" : "en",
+          eventId,
+          updatedAt: new Date().toISOString(),
+        }
+      : {
+          active: false,
+          stage: "idle",
+          language: null,
+          customerName: null,
+          companyName: null,
+          propertyType: null,
+          projectAddress: null,
+          projectScope: null,
+          preferredDate: null,
+          preferredPeriod: null,
+          offeredSlots: [],
+          selectedStart: null,
+          selectedDisplay: null,
+          eventId: null,
+          updatedAt: new Date().toISOString(),
+        };
+
+  const updateResponse = await zernioFetch(
+    `/contacts/${encodeURIComponent(contactIdentifier)}/fields/booking_state`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ value: JSON.stringify(nextState) }),
+    },
+  );
+
+  if (!updateResponse.ok) {
+    return { updated: false, reason: "state_update_failed" };
+  }
+
+  return {
+    updated: true,
+    stage: nextState.stage,
+  };
+}
+
 function eventToPublicBooking(event) {
   const privateData = event?.extendedProperties?.private ?? {};
   return {
@@ -395,8 +473,15 @@ export default async function handler(request, response) {
     const language = privateData.language === "es" ? "es" : "en";
     const customerName = privateData.customerName || event.summary?.split("—").at(-1)?.trim() || "Customer";
     let notification = { sent: false, reason: "already_processed" };
+    let contactState = { updated: false, reason: "already_processed" };
 
     if (!result.alreadyProcessed) {
+      contactState = await syncContactBookingState({
+        contactIdentifier: privateData.contactIdentifier,
+        action,
+        eventId,
+        language,
+      });
       notification = await sendWhatsAppNotification({
         conversationId: privateData.conversationId,
         message: notificationMessage({
@@ -415,6 +500,7 @@ export default async function handler(request, response) {
       action,
       bookingStatus: result.targetStatus,
       alreadyProcessed: result.alreadyProcessed,
+      contactState,
       notification,
       event: eventToPublicBooking(event),
     });
