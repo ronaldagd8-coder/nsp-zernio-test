@@ -412,6 +412,26 @@ function getCustomFields(contact) {
   return contact?.customFields ?? contact?.metadata?.customFields ?? {};
 }
 
+function getContactPhone(contact) {
+  const candidates = [
+    contact?.phone,
+    contact?.phoneNumber,
+    contact?.platformIdentifier,
+    contact?.displayIdentifier,
+    contact?.metadata?.phone,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = normalizeText(
+      candidate === null || candidate === undefined ? "" : String(candidate),
+      100,
+    );
+    if (normalized) return normalized;
+  }
+
+  return "";
+}
+
 async function saveState(contactId, state) {
   const value = JSON.stringify({ ...state, updatedAt: new Date().toISOString() });
   const response = await zernioFetch(
@@ -738,6 +758,9 @@ export default async function handler(request, response) {
         projectScope: state.projectScope,
         selectedStart: state.selectedStart,
         contactIdentifier: contactId,
+        conversationId,
+        whatsappNumber: getContactPhone(contact),
+        language,
       });
 
       if (bookingResult.ok) {
