@@ -186,8 +186,46 @@ function firstNonEmpty(...values) {
   return "";
 }
 
+function findNestedMessageText(value, depth = 0) {
+  if (value === null || value === undefined || depth > 7) return "";
+
+  if (typeof value === "string") {
+    return normalizeText(value, 1500);
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 10)) {
+      const found = findNestedMessageText(item, depth + 1);
+      if (found) return found;
+    }
+    return "";
+  }
+
+  if (typeof value !== "object") return "";
+
+  const priorityKeys = [
+    "body",
+    "text",
+    "content",
+    "caption",
+    "messageText",
+    "transcript",
+    "message",
+    "payload",
+    "data",
+  ];
+
+  for (const key of priorityKeys) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    const found = findNestedMessageText(value[key], depth + 1);
+    if (found) return found;
+  }
+
+  return "";
+}
+
 function messageText(message) {
-  return firstNonEmpty(
+  const directText = firstNonEmpty(
     message?.body,
     message?.text,
     message?.content,
@@ -200,6 +238,8 @@ function messageText(message) {
     message?.data?.body,
     message?.data?.text,
   );
+
+  return directText || findNestedMessageText(message);
 }
 
 function messageIsInbound(message) {
@@ -831,4 +871,3 @@ export default async function handler(request, response) {
     });
   }
 }
-
