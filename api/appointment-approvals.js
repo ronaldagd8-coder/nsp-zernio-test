@@ -454,6 +454,40 @@ export default async function handler(request, response) {
 
     const eventId = normalizeText(request.body?.eventId, 300);
     const action = normalizeText(request.body?.action, 20);
+
+    if (action === "reset_contact") {
+      const contactIdentifier = normalizeText(
+        request.body?.contactIdentifier,
+        300,
+      );
+      if (!contactIdentifier) {
+        return response.status(400).json({
+          ok: false,
+          error: "A contactIdentifier is required",
+        });
+      }
+
+      const contactState = await syncContactBookingState({
+        contactIdentifier,
+        action: "decline",
+        eventId: null,
+        language: "en",
+      });
+
+      if (!contactState.updated) {
+        return response.status(502).json({
+          ok: false,
+          error: "The contact booking state could not be reset",
+          reason: contactState.reason,
+        });
+      }
+
+      return response.status(200).json({
+        ok: true,
+        contactState,
+      });
+    }
+
     if (!eventId || !["approve", "decline"].includes(action)) {
       return response.status(400).json({ ok: false, error: "A valid eventId and action are required" });
     }
