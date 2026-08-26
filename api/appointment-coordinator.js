@@ -607,20 +607,46 @@ function applyExpectedFieldAnswer(state, analysis, currentMessage) {
     nextAnalysis.projectAddress = answer;
   }
 
+  // Preserve useful partial location data. If the customer first gives a city
+  // and state and then supplies only the street number/name, combine both
+  // replies before validating the address.
+  if (
+    expectedField === "projectAddress" &&
+    !normalizeText(nextAnalysis.projectAddress)
+  ) {
+    const previousAddress = normalizeText(state.projectAddress, 500);
+    const combinedAddress = previousAddress
+      ? `${answer}, ${previousAddress}`
+      : answer;
+
+    if (isCompleteProjectAddress(combinedAddress)) {
+      nextAnalysis.projectAddress = combinedAddress;
+    }
+  }
+
   return nextAnalysis;
 }
 
-function askForField(field, language) {
+function askForField(field, language, state = {}) {
+  const hasPartialAddress =
+    field === "projectAddress" &&
+    normalizeText(state.projectAddress, 500) &&
+    !isCompleteProjectAddress(state.projectAddress);
+
   const es = {
     customerName: "Para preparar la solicitud, ¿me indicas tu nombre?",
     propertyType: "¿Qué tipo de propiedad o negocio comercial es? Por ejemplo, restaurante, oficina o tienda.",
-    projectAddress: "¿Cuál es la dirección física completa de la propiedad comercial? Incluye número, calle, ciudad, estado y código postal si lo tienes. Necesitamos la ubicación exacta para poder solicitar la visita.",
+    projectAddress: hasPartialAddress
+      ? "Gracias, ya tengo esa parte de la ubicación. Para completar la dirección, ¿cuál es el número y el nombre de la calle? Si tienes el código postal, inclúyelo también."
+      : "¿Cuál es la dirección física completa de la propiedad comercial? Incluye número, calle, ciudad, estado y código postal si lo tienes. Necesitamos la ubicación exacta para poder solicitar la visita.",
     projectScope: "¿Qué trabajo necesitas que revisemos durante la visita?",
   };
   const en = {
     customerName: "To prepare the request, may I have your name?",
     propertyType: "What type of commercial property or business is it, such as a restaurant, office, or retail store?",
-    projectAddress: "What is the complete physical address of the commercial property? Please include the street number, street name, city, state, and ZIP code if available. We need the exact location to request the visit.",
+    projectAddress: hasPartialAddress
+      ? "Thank you, I have that part of the location. To complete the address, what are the street number and street name? Please include the ZIP code if available."
+      : "What is the complete physical address of the commercial property? Please include the street number, street name, city, state, and ZIP code if available. We need the exact location to request the visit.",
     projectScope: "What work would you like us to review during the visit?",
   };
   return (language === "es" ? es : en)[field];
@@ -901,7 +927,7 @@ export default async function handler(request, response) {
           ok: true,
           handled: true,
           language,
-          reply: askForField(missing[0], language),
+          reply: askForField(missing[0], language, state),
           stage: state.stage,
           missingFields: missing,
         });
@@ -926,7 +952,7 @@ export default async function handler(request, response) {
         ok: true,
         handled: true,
         language,
-        reply: askForField(missingDetails[0], language),
+        reply: askForField(missingDetails[0], language, state),
         stage: state.stage,
         missingFields: missingDetails,
       });
