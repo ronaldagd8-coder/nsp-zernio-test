@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 
 const ZERNIO_API_BASE_URL = "https://zernio.com/api/v1";
-const AI_PAUSE_DURATION_MS = 24 * 60 * 60 * 1000;
+const AI_PAUSE_DURATION_MS = 1 * 60 * 1000;
 
 function secretsMatch(receivedSecret, expectedSecret) {
   if (!receivedSecret || !expectedSecret) return false;
