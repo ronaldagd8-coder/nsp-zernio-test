@@ -796,6 +796,12 @@ export default async function handler(request, response) {
         language,
         reply: confirmationReply(state, language),
         stage: state.stage,
+        confirmationDiagnostic: {
+          messageRead: normalizeText(effectiveCurrentMessage, 160),
+          normalizedMessage: normalizeForIntent(effectiveCurrentMessage),
+          directConfirmation: isDirectConfirmation(effectiveCurrentMessage),
+          aiConfirmation: analysis.explicitConfirmation === true,
+        },
       });
     }
 
