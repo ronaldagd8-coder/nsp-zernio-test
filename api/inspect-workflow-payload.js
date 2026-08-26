@@ -13,43 +13,97 @@ function secretsMatch(receivedSecret, expectedSecret) {
 }
 
 function isObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  return value !== null && typeof value === "object";
 }
 
-function keysOf(value) {
-  return isObject(value) ? Object.keys(value).slice(0, 50) : [];
+function isRelevantPath(path) {
+  return /(message|text|body|content|contact|conversation|transcript|voice|audio|phone|identifier)/i.test(
+    path,
+  );
 }
 
-function describe(value) {
-  if (value === null) return { type: "null" };
-  if (value === undefined) return { type: "undefined" };
+function isSensitivePath(path) {
+  return /(secret|token|authorization|password|api.?key)/i.test(path);
+}
+
+function safeValue(value) {
+  if (typeof value === "string") {
+    return value.slice(0, 180);
+  }
+
+  if (
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+
+  return null;
+}
+
+function findRelevantValues(
+  value,
+  currentPath = "body",
+  depth = 0,
+  findings = [],
+) {
+  if (depth > 6 || findings.length >= 20) {
+    return findings;
+  }
+
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value !== "object"
+  ) {
+    if (
+      isRelevantPath(currentPath) &&
+      !isSensitivePath(currentPath)
+    ) {
+      const cleanedValue = safeValue(value);
+
+      if (cleanedValue !== null && cleanedValue !== "") {
+        findings.push({
+          path: currentPath,
+          value: cleanedValue,
+        });
+      }
+    }
+
+    return findings;
+  }
 
   if (Array.isArray(value)) {
-    return {
-      type: "array",
-      length: value.length,
-    };
+    value.slice(0, 5).forEach((item, index) => {
+      findRelevantValues(
+        item,
+        `${currentPath}[${index}]`,
+        depth + 1,
+        findings,
+      );
+    });
+
+    return findings;
   }
 
-  if (isObject(value)) {
-    return {
-      type: "object",
-      keys: Object.keys(value).slice(0, 30),
-    };
+  for (const [key, nestedValue] of Object.entries(value)) {
+    const nextPath = `${currentPath}.${key}`;
+
+    if (isSensitivePath(nextPath)) {
+      continue;
+    }
+
+    findRelevantValues(
+      nestedValue,
+      nextPath,
+      depth + 1,
+      findings,
+    );
+
+    if (findings.length >= 20) break;
   }
 
-  if (typeof value === "string") {
-    return {
-      type: "string",
-      length: value.length,
-      preview: value.slice(0, 150),
-    };
-  }
-
-  return {
-    type: typeof value,
-    value,
-  };
+  return findings;
 }
 
 export default async function handler(request, response) {
@@ -81,42 +135,23 @@ export default async function handler(request, response) {
     });
   }
 
-  const body = isObject(request.body) ? request.body : {};
+  const body =
+    isObject(request.body) && !Array.isArray(request.body)
+      ? request.body
+      : {};
+
+  const findings = findRelevantValues(body);
 
   return response.status(200).json({
     ok: true,
-
-    topLevelKeys: keysOf(body),
-
-    event: describe(body.event),
-    contact: describe(body.contact),
-    variables: describe(body.variables),
-    message: describe(body.message),
-
-    conversationId: describe(body.conversationId),
-    contactId: describe(body.contactId),
-    messageText: describe(body.messageText),
-    voiceTranscript: describe(body.voiceTranscript),
-
-    nestedCandidates: {
-      eventMessage: describe(body.event?.message),
-      eventBody: describe(body.event?.body),
-      eventText: describe(body.event?.text),
-
-      contactId: describe(body.contact?.id),
-      contactInternalId: describe(body.contact?._id),
-      contactPhone: describe(body.contact?.phone),
-
-      variableMessage: describe(body.variables?.message),
-      variableMessageBody: describe(body.variables?.message?.body),
-      variableConversationId: describe(
-        body.variables?.conversationId,
-      ),
-      variableContactId: describe(body.variables?.contactId),
-      variableVoiceInput: describe(body.variables?.voiceInput),
-      variableAppointmentResult: describe(
-        body.variables?.appointmentResult,
-      ),
-    },
+    findings,
+    variableKeys:
+      body.variables && typeof body.variables === "object"
+        ? Object.keys(body.variables).slice(0, 30)
+        : [],
+    eventKeys:
+      body.event && typeof body.event === "object"
+        ? Object.keys(body.event).slice(0, 30)
+        : [],
   });
 }
