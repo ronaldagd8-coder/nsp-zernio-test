@@ -1,0 +1,617 @@
+import { createHash, createPrivateKey, createSign, timingSafeEqual } from "node:crypto";
+
+const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const GOOGLE_CALENDAR_API = "https://www.googleapis.com/calendar/v3";
+const GOOGLE_SCOPE = "https://www.googleapis.com/auth/calendar";
+
+const TIME_ZONE = "America/Chicago";
+const APPOINTMENT_MINUTES = 60;
+const BUFFER_MINUTES = 60;
+const MINIMUM_NOTICE_HOURS = 24;
+const MAXIMUM_ADVANCE_DAYS = 30;
+const ALLOWED_START_HOURS = [9, 11, 13, 15];
+
+function secretsMatch(receivedSecret, expectedSecret) {
+  if (!receivedSecret || !expectedSecret) return false;
+
+  const received = Buffer.from(String(receivedSecret));
+  const expected = Buffer.from(String(expectedSecret));
+
+  return (
+    received.length === expected.length &&
+    timingSafeEqual(received, expected)
+  );
+}
+
+function base64UrlEncode(value) {
+  return Buffer.from(value)
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+function getServiceAccount() {
+  const encoded = process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64;
+
+  if (!encoded) {
+    throw new Error("Google service account is not configured");
+  }
+
+  const decoded = Buffer.from(encoded, "base64").toString("utf8");
+  const serviceAccount = JSON.parse(decoded);
+
+  if (!serviceAccount.client_email || !serviceAccount.private_key) {
+    throw new Error("Invalid Google service account configuration");
+  }
+
+  return serviceAccount;
+}
+
+function createGoogleJwt(serviceAccount) {
+  const now = Math.floor(Date.now() / 1000);
+
+  const header = {
+    alg: "RS256",
+    typ: "JWT",
+  };
+
+  const payload = {
+    iss: serviceAccount.client_email,
+    scope: GOOGLE_SCOPE,
+    aud: GOOGLE_TOKEN_URL,
+    iat: now,
+    exp: now + 3600,
+  };
+
+  const encodedHeader = base64UrlEncode(JSON.stringify(header));
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  const unsignedToken = `${encodedHeader}.${encodedPayload}`;
+
+  const signer = createSign("RSA-SHA256");
+  signer.update(unsignedToken);
+  signer.end();
+
+  const privateKey = createPrivateKey(serviceAccount.private_key);
+  const signature = signer
+    .sign(privateKey)
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+
+  return `${unsignedToken}.${signature}`;
+}
+
+async function getGoogleAccessToken() {
+  const serviceAccount = getServiceAccount();
+  const assertion = createGoogleJwt(serviceAccount);
+
+  const tokenResponse = await fetch(GOOGLE_TOKEN_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion,
+    }),
+  });
+
+  if (!tokenResponse.ok) {
+    throw new Error(`Google authentication failed: ${tokenResponse.status}`);
+  }
+
+  const tokenData = await tokenResponse.json();
+
+  if (!tokenData.access_token) {
+    throw new Error("Google did not return an access token");
+  }
+
+  return tokenData.access_token;
+}
+
+function getLocalDateParts(date) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: TIME_ZONE,
+    weekday: "long",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+
+  const parts = formatter.formatToParts(date);
+  const values = {};
+
+  for (const part of parts) {
+    if (part.type !== "literal") {
+      values[part.type] = part.value;
+    }
+  }
+
+  return {
+    weekday: values.weekday,
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour),
+    minute: Number(values.minute),
+  };
+}
+
+function validateSelectedSlot(selectedStart) {
+  const start = new Date(selectedStart);
+
+  if (Number.isNaN(start.getTime())) {
+    return {
+      valid: false,
+      error: "The selected appointment time is invalid",
+    };
+  }
+
+  const now = new Date();
+  const earliestAllowed = new Date(
+    now.getTime() + MINIMUM_NOTICE_HOURS * 60 * 60 * 1000,
+  );
+  const latestAllowed = new Date(
+    now.getTime() + MAXIMUM_ADVANCE_DAYS * 24 * 60 * 60 * 1000,
+  );
+
+  if (start < earliestAllowed) {
+    return {
+      valid: false,
+      error: "Appointments require at least 24 hours of notice",
+    };
+  }
+
+  if (start > latestAllowed) {
+    return {
+      valid: false,
+      error: "Appointments can only be booked up to 30 days in advance",
+    };
+  }
+
+  const local = getLocalDateParts(start);
+  const allowedWeekdays = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+  ];
+
+  if (!allowedWeekdays.includes(local.weekday)) {
+    return {
+      valid: false,
+      error: "Appointments are only available Monday through Friday",
+    };
+  }
+
+  if (
+    !ALLOWED_START_HOURS.includes(local.hour) ||
+    local.minute !== 0
+  ) {
+    return {
+      valid: false,
+      error: "The selected time is not an available appointment slot",
+    };
+  }
+
+  return {
+    valid: true,
+    start,
+    local,
+  };
+}
+
+function normalizeText(value, maximumLength = 1000) {
+  if (typeof value !== "string") return "";
+
+  return value.trim().slice(0, maximumLength);
+}
+
+function normalizeEmail(value) {
+  const email = normalizeText(value, 254);
+
+  if (!email) return "";
+
+  const basicEmailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return basicEmailPattern.test(email) ? email : null;
+}
+
+function createBookingKey({
+  contactIdentifier,
+  selectedStart,
+  customerName,
+}) {
+  return createHash("sha256")
+    .update(
+      `${contactIdentifier}|${selectedStart}|${customerName.toLowerCase()}`,
+    )
+    .digest("hex")
+    .slice(0, 40);
+}
+
+async function googleCalendarFetch(path, accessToken, options = {}) {
+  return fetch(`${GOOGLE_CALENDAR_API}${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+  });
+}
+
+async function findExistingBooking({
+  accessToken,
+  calendarId,
+  bookingKey,
+  selectedStart,
+}) {
+  const start = new Date(selectedStart);
+  const timeMin = new Date(start.getTime() - 24 * 60 * 60 * 1000);
+  const timeMax = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+
+  const query = new URLSearchParams({
+    timeMin: timeMin.toISOString(),
+    timeMax: timeMax.toISOString(),
+    singleEvents: "true",
+    privateExtendedProperty: `bookingKey=${bookingKey}`,
+    maxResults: "1",
+  });
+
+  const existingResponse = await googleCalendarFetch(
+    `/calendars/${encodeURIComponent(calendarId)}/events?${query.toString()}`,
+    accessToken,
+  );
+
+  if (!existingResponse.ok) {
+    throw new Error(
+      `Existing booking lookup failed: ${existingResponse.status}`,
+    );
+  }
+
+  const existingData = await existingResponse.json();
+  return existingData.items?.[0] ?? null;
+}
+
+async function checkSlotAvailability({
+  accessToken,
+  calendarId,
+  start,
+  end,
+}) {
+  const bufferedStart = new Date(
+    start.getTime() - BUFFER_MINUTES * 60 * 1000,
+  );
+  const bufferedEnd = new Date(
+    end.getTime() + BUFFER_MINUTES * 60 * 1000,
+  );
+
+  const freeBusyResponse = await googleCalendarFetch(
+    "/freeBusy",
+    accessToken,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        timeMin: bufferedStart.toISOString(),
+        timeMax: bufferedEnd.toISOString(),
+        timeZone: TIME_ZONE,
+        items: [{ id: calendarId }],
+      }),
+    },
+  );
+
+  if (!freeBusyResponse.ok) {
+    throw new Error(
+      `Google availability check failed: ${freeBusyResponse.status}`,
+    );
+  }
+
+  const freeBusyData = await freeBusyResponse.json();
+  const busyPeriods =
+    freeBusyData.calendars?.[calendarId]?.busy ?? [];
+
+  const hasConflict = busyPeriods.some((period) => {
+    const busyStart = new Date(period.start);
+    const busyEnd = new Date(period.end);
+
+    return busyStart < bufferedEnd && busyEnd > bufferedStart;
+  });
+
+  return !hasConflict;
+}
+
+function formatAppointment(start) {
+  const dateLabel = new Intl.DateTimeFormat("en-US", {
+    timeZone: TIME_ZONE,
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(start);
+
+  const timeLabel = new Intl.DateTimeFormat("en-US", {
+    timeZone: TIME_ZONE,
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(start);
+
+  return {
+    dateLabel,
+    timeLabel,
+    display: `${dateLabel} at ${timeLabel} Central Time`,
+  };
+}
+
+export default async function handler(request, response) {
+  response.setHeader("Cache-Control", "no-store");
+
+  if (request.method !== "POST") {
+    response.setHeader("Allow", "POST");
+
+    return response.status(405).json({
+      ok: false,
+      error: "Method not allowed",
+    });
+  }
+
+  const receivedSecret =
+    request.headers["x-webhook-secret"] ??
+    request.body?.webhookSecret ??
+    request.query?.secret;
+
+  if (
+    !secretsMatch(
+      receivedSecret,
+      process.env.INTERNAL_WEBHOOK_SECRET,
+    )
+  ) {
+    return response.status(401).json({
+      ok: false,
+      error: "Unauthorized",
+    });
+  }
+
+  if (!process.env.GOOGLE_CALENDAR_ID) {
+    return response.status(500).json({
+      ok: false,
+      error: "Google Calendar is not configured",
+    });
+  }
+
+  const customerName = normalizeText(
+    request.body?.customerName ??
+      request.body?.booking?.customerName,
+    150,
+  );
+
+  const companyName = normalizeText(
+    request.body?.companyName ??
+      request.body?.booking?.companyName,
+    150,
+  );
+
+  const propertyType = normalizeText(
+    request.body?.propertyType ??
+      request.body?.booking?.propertyType,
+    200,
+  );
+
+  const projectAddress = normalizeText(
+    request.body?.projectAddress ??
+      request.body?.booking?.projectAddress,
+    500,
+  );
+
+  const projectScope = normalizeText(
+    request.body?.projectScope ??
+      request.body?.booking?.projectScope,
+    2000,
+  );
+
+  const selectedStart = normalizeText(
+    request.body?.selectedStart ??
+      request.body?.booking?.selectedStart,
+    100,
+  );
+
+  const contactIdentifier = normalizeText(
+    request.body?.contactId ??
+      request.body?.whatsappNumber ??
+      request.body?.contactIdentifier ??
+      request.body?.contact?.id ??
+      request.body?.contact?.phone ??
+      request.body?.booking?.contactIdentifier,
+    200,
+  );
+
+  const email = normalizeEmail(
+    request.body?.email ??
+      request.body?.booking?.email,
+  );
+
+  const missingFields = [];
+
+  if (!customerName) missingFields.push("customerName");
+  if (!propertyType) missingFields.push("propertyType");
+  if (!projectAddress) missingFields.push("projectAddress");
+  if (!projectScope) missingFields.push("projectScope");
+  if (!selectedStart) missingFields.push("selectedStart");
+  if (!contactIdentifier) missingFields.push("contactIdentifier");
+
+  if (missingFields.length > 0) {
+    return response.status(400).json({
+      ok: false,
+      error: "Required booking information is missing",
+      missingFields,
+    });
+  }
+
+  if (email === null) {
+    return response.status(400).json({
+      ok: false,
+      error: "The email address is invalid",
+    });
+  }
+
+  const slotValidation = validateSelectedSlot(selectedStart);
+
+  if (!slotValidation.valid) {
+    return response.status(400).json({
+      ok: false,
+      error: slotValidation.error,
+    });
+  }
+
+  const start = slotValidation.start;
+  const end = new Date(
+    start.getTime() + APPOINTMENT_MINUTES * 60 * 1000,
+  );
+
+  const bookingKey = createBookingKey({
+    contactIdentifier,
+    selectedStart: start.toISOString(),
+    customerName,
+  });
+
+  try {
+    const accessToken = await getGoogleAccessToken();
+    const calendarId = process.env.GOOGLE_CALENDAR_ID;
+
+    const existingBooking = await findExistingBooking({
+      accessToken,
+      calendarId,
+      bookingKey,
+      selectedStart: start.toISOString(),
+    });
+
+    if (existingBooking) {
+      const formatted = formatAppointment(start);
+
+      return response.status(200).json({
+        ok: true,
+        alreadyBooked: true,
+        eventId: existingBooking.id,
+        eventLink: existingBooking.htmlLink ?? null,
+        start: start.toISOString(),
+        end: end.toISOString(),
+        timeZone: TIME_ZONE,
+        ...formatted,
+      });
+    }
+
+    const slotIsAvailable = await checkSlotAvailability({
+      accessToken,
+      calendarId,
+      start,
+      end,
+    });
+
+    if (!slotIsAvailable) {
+      return response.status(409).json({
+        ok: false,
+        error: "The selected appointment time is no longer available",
+        slotUnavailable: true,
+      });
+    }
+
+    const descriptionLines = [
+      `Customer: ${customerName}`,
+      companyName ? `Company: ${companyName}` : null,
+      `Property type: ${propertyType}`,
+      `Project address: ${projectAddress}`,
+      `Project scope: ${projectScope}`,
+      `WhatsApp/Contact: ${contactIdentifier}`,
+      email ? `Email: ${email}` : null,
+      "",
+      "Created through the NEXT SOLUTIONS PARTNERS scheduling assistant.",
+    ].filter(Boolean);
+
+    const event = {
+      summary: `Commercial Site Visit — ${customerName}`,
+      location: projectAddress,
+      description: descriptionLines.join("\n"),
+      start: {
+        dateTime: start.toISOString(),
+        timeZone: TIME_ZONE,
+      },
+      end: {
+        dateTime: end.toISOString(),
+        timeZone: TIME_ZONE,
+      },
+      extendedProperties: {
+        private: {
+          bookingKey,
+          source: "nsp_zernio_assistant",
+          contactIdentifier,
+        },
+      },
+    };
+
+    if (email) {
+      event.attendees = [{ email }];
+    }
+
+    const eventQuery = new URLSearchParams({
+      sendUpdates: email ? "all" : "none",
+    });
+
+    const createResponse = await googleCalendarFetch(
+      `/calendars/${encodeURIComponent(calendarId)}/events?${eventQuery.toString()}`,
+      accessToken,
+      {
+        method: "POST",
+        body: JSON.stringify(event),
+      },
+    );
+
+    if (!createResponse.ok) {
+      const errorText = await createResponse.text();
+
+      console.error("Google Calendar event creation failed", {
+        status: createResponse.status,
+        response: errorText.slice(0, 500),
+      });
+
+      return response.status(502).json({
+        ok: false,
+        error: "The appointment could not be created",
+      });
+    }
+
+    const createdEvent = await createResponse.json();
+    const formatted = formatAppointment(start);
+
+    return response.status(201).json({
+      ok: true,
+      alreadyBooked: false,
+      eventId: createdEvent.id,
+      eventLink: createdEvent.htmlLink ?? null,
+      start: start.toISOString(),
+      end: end.toISOString(),
+      timeZone: TIME_ZONE,
+      customerName,
+      projectAddress,
+      ...formatted,
+    });
+  } catch (error) {
+    console.error("Unexpected calendar booking error", {
+      message:
+        error instanceof Error
+          ? error.message
+          : "Unknown calendar booking error",
+    });
+
+    return response.status(502).json({
+      ok: false,
+      error: "The appointment could not be created",
+    });
+  }
+}
