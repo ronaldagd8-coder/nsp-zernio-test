@@ -1,4 +1,9 @@
-import { createHash, createPrivateKey, createSign, timingSafeEqual } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  createSign,
+  timingSafeEqual,
+} from "node:crypto";
 
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_CALENDAR_API = "https://www.googleapis.com/calendar/v3";
@@ -73,6 +78,7 @@ function createGoogleJwt(serviceAccount) {
   signer.end();
 
   const privateKey = createPrivateKey(serviceAccount.private_key);
+
   const signature = signer
     .sign(privateKey)
     .toString("base64")
@@ -99,7 +105,9 @@ async function getGoogleAccessToken() {
   });
 
   if (!tokenResponse.ok) {
-    throw new Error(`Google authentication failed: ${tokenResponse.status}`);
+    throw new Error(
+      `Google authentication failed: ${tokenResponse.status}`,
+    );
   }
 
   const tokenData = await tokenResponse.json();
@@ -153,9 +161,11 @@ function validateSelectedSlot(selectedStart) {
   }
 
   const now = new Date();
+
   const earliestAllowed = new Date(
     now.getTime() + MINIMUM_NOTICE_HOURS * 60 * 60 * 1000,
   );
+
   const latestAllowed = new Date(
     now.getTime() + MAXIMUM_ADVANCE_DAYS * 24 * 60 * 60 * 1000,
   );
@@ -175,6 +185,7 @@ function validateSelectedSlot(selectedStart) {
   }
 
   const local = getLocalDateParts(start);
+
   const allowedWeekdays = [
     "Monday",
     "Tuesday",
@@ -219,6 +230,7 @@ function normalizeEmail(value) {
   if (!email) return "";
 
   const basicEmailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
   return basicEmailPattern.test(email) ? email : null;
 }
 
@@ -235,7 +247,11 @@ function createBookingKey({
     .slice(0, 40);
 }
 
-async function googleCalendarFetch(path, accessToken, options = {}) {
+async function googleCalendarFetch(
+  path,
+  accessToken,
+  options = {},
+) {
   return fetch(`${GOOGLE_CALENDAR_API}${path}`, {
     ...options,
     headers: {
@@ -254,8 +270,14 @@ async function findExistingBooking({
   selectedStart,
 }) {
   const start = new Date(selectedStart);
-  const timeMin = new Date(start.getTime() - 24 * 60 * 60 * 1000);
-  const timeMax = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+
+  const timeMin = new Date(
+    start.getTime() - 24 * 60 * 60 * 1000,
+  );
+
+  const timeMax = new Date(
+    start.getTime() + 24 * 60 * 60 * 1000,
+  );
 
   const query = new URLSearchParams({
     timeMin: timeMin.toISOString(),
@@ -266,7 +288,9 @@ async function findExistingBooking({
   });
 
   const existingResponse = await googleCalendarFetch(
-    `/calendars/${encodeURIComponent(calendarId)}/events?${query.toString()}`,
+    `/calendars/${encodeURIComponent(
+      calendarId,
+    )}/events?${query.toString()}`,
     accessToken,
   );
 
@@ -277,6 +301,7 @@ async function findExistingBooking({
   }
 
   const existingData = await existingResponse.json();
+
   return existingData.items?.[0] ?? null;
 }
 
@@ -289,6 +314,7 @@ async function checkSlotAvailability({
   const bufferedStart = new Date(
     start.getTime() - BUFFER_MINUTES * 60 * 1000,
   );
+
   const bufferedEnd = new Date(
     end.getTime() + BUFFER_MINUTES * 60 * 1000,
   );
@@ -314,6 +340,7 @@ async function checkSlotAvailability({
   }
 
   const freeBusyData = await freeBusyResponse.json();
+
   const busyPeriods =
     freeBusyData.calendars?.[calendarId]?.busy ?? [];
 
@@ -437,14 +464,35 @@ export default async function handler(request, response) {
       request.body?.booking?.email,
   );
 
+  const notificationEmail = normalizeEmail(
+    process.env.BOOKING_NOTIFICATION_EMAIL,
+  );
+
   const missingFields = [];
 
-  if (!customerName) missingFields.push("customerName");
-  if (!propertyType) missingFields.push("propertyType");
-  if (!projectAddress) missingFields.push("projectAddress");
-  if (!projectScope) missingFields.push("projectScope");
-  if (!selectedStart) missingFields.push("selectedStart");
-  if (!contactIdentifier) missingFields.push("contactIdentifier");
+  if (!customerName) {
+    missingFields.push("customerName");
+  }
+
+  if (!propertyType) {
+    missingFields.push("propertyType");
+  }
+
+  if (!projectAddress) {
+    missingFields.push("projectAddress");
+  }
+
+  if (!projectScope) {
+    missingFields.push("projectScope");
+  }
+
+  if (!selectedStart) {
+    missingFields.push("selectedStart");
+  }
+
+  if (!contactIdentifier) {
+    missingFields.push("contactIdentifier");
+  }
 
   if (missingFields.length > 0) {
     return response.status(400).json({
@@ -461,6 +509,13 @@ export default async function handler(request, response) {
     });
   }
 
+  if (!notificationEmail) {
+    return response.status(500).json({
+      ok: false,
+      error: "Booking notification email is not configured",
+    });
+  }
+
   const slotValidation = validateSelectedSlot(selectedStart);
 
   if (!slotValidation.valid) {
@@ -471,6 +526,7 @@ export default async function handler(request, response) {
   }
 
   const start = slotValidation.start;
+
   const end = new Date(
     start.getTime() + APPOINTMENT_MINUTES * 60 * 1000,
   );
@@ -498,6 +554,8 @@ export default async function handler(request, response) {
       return response.status(200).json({
         ok: true,
         alreadyBooked: true,
+        bookingStatus: "pending_approval",
+        requiresTeamApproval: true,
         eventId: existingBooking.id,
         eventLink: existingBooking.htmlLink ?? null,
         start: start.toISOString(),
@@ -517,56 +575,75 @@ export default async function handler(request, response) {
     if (!slotIsAvailable) {
       return response.status(409).json({
         ok: false,
-        error: "The selected appointment time is no longer available",
+        error:
+          "The selected appointment time is no longer available",
         slotUnavailable: true,
       });
     }
 
     const descriptionLines = [
+      "STATUS: PENDING TEAM APPROVAL",
+      "",
       `Customer: ${customerName}`,
       companyName ? `Company: ${companyName}` : null,
       `Property type: ${propertyType}`,
       `Project address: ${projectAddress}`,
       `Project scope: ${projectScope}`,
       `WhatsApp/Contact: ${contactIdentifier}`,
-      email ? `Email: ${email}` : null,
+      email ? `Customer email: ${email}` : null,
+      "",
+      "This time is being held provisionally.",
+      "The appointment is not final until approved by the NEXT SOLUTIONS PARTNERS team.",
       "",
       "Created through the NEXT SOLUTIONS PARTNERS scheduling assistant.",
     ].filter(Boolean);
 
     const event = {
-  status: "tentative",
-  summary: `PENDING APPROVAL — Commercial Site Visit — ${customerName}`,
+      status: "tentative",
+
+      summary:
+        `PENDING APPROVAL — Commercial Site Visit — ${customerName}`,
+
       location: projectAddress,
+
       description: descriptionLines.join("\n"),
+
       start: {
         dateTime: start.toISOString(),
         timeZone: TIME_ZONE,
       },
+
       end: {
         dateTime: end.toISOString(),
         timeZone: TIME_ZONE,
       },
+
+      attendees: [
+        {
+          email: notificationEmail,
+          responseStatus: "needsAction",
+        },
+      ],
+
       extendedProperties: {
         private: {
           bookingKey,
           source: "nsp_zernio_assistant",
           bookingStatus: "pending_approval",
           contactIdentifier,
+          customerEmail: email || "",
         },
       },
     };
 
-    if (email) {
-      event.attendees = [{ email }];
-    }
-
     const eventQuery = new URLSearchParams({
-      sendUpdates: email ? "all" : "none",
+      sendUpdates: "all",
     });
 
     const createResponse = await googleCalendarFetch(
-      `/calendars/${encodeURIComponent(calendarId)}/events?${eventQuery.toString()}`,
+      `/calendars/${encodeURIComponent(
+        calendarId,
+      )}/events?${eventQuery.toString()}`,
       accessToken,
       {
         method: "POST",
@@ -577,14 +654,17 @@ export default async function handler(request, response) {
     if (!createResponse.ok) {
       const errorText = await createResponse.text();
 
-      console.error("Google Calendar event creation failed", {
-        status: createResponse.status,
-        response: errorText.slice(0, 500),
-      });
+      console.error(
+        "Google Calendar event creation failed",
+        {
+          status: createResponse.status,
+          response: errorText.slice(0, 500),
+        },
+      );
 
       return response.status(502).json({
         ok: false,
-        error: "The appointment could not be created",
+        error: "The appointment request could not be created",
       });
     }
 
@@ -615,7 +695,7 @@ export default async function handler(request, response) {
 
     return response.status(502).json({
       ok: false,
-      error: "The appointment could not be created",
+      error: "The appointment request could not be created",
     });
   }
 }
