@@ -169,44 +169,42 @@ export default async function handler(request, response) {
 
   const findings = inspectPayload(body);
 
-    const prioritizedFindings = findings.sort((a, b) => {
-    const score = (item) => {
-      const path = String(item.path ?? "").toLowerCase();
+      const compactFindings = Array.isArray(findings)
+    ? findings
+        .filter((item) => {
+          const path = String(item?.path ?? "").toLowerCase();
 
-      if (path.includes("attachment")) return 1;
-      if (path.includes("audio")) return 2;
-      if (path.includes("media")) return 3;
-      if (path.includes("accountid")) return 4;
+          return (
+            path.includes("attachment") ||
+            path.includes("audio") ||
+            path.includes("media") ||
+            path.includes("accountid")
+          );
+        })
+        .slice(0, 20)
+        .map((item) => ({
+          path: String(item?.path ?? "").slice(0, 250),
+          type: String(item?.valueType ?? ""),
+          value:
+            typeof item?.value === "string"
+              ? item.value.slice(0, 250)
+              : undefined,
+          pathname:
+            typeof item?.pathname === "string"
+              ? item.pathname.slice(0, 250)
+              : undefined,
+          keys: Array.isArray(item?.keys)
+            ? item.keys.slice(0, 20)
+            : undefined,
+          count:
+            typeof item?.itemCount === "number"
+              ? item.itemCount
+              : undefined,
+        }))
+    : [];
 
-      return 5;
-    };
-
-    return score(a) - score(b);
+    return response.status(200).json({
+    ok: true,
+    findings: compactFindings,
   });
-
-  const compactResult = prioritizedFindings
-    .slice(0, 15)
-    .map((item) => {
-      const detail =
-        item.value ??
-        item.pathname ??
-        item.keys?.join(",") ??
-        item.itemCount ??
-        item.valueType ??
-        "found";
-
-      return `${item.path}=${detail}`;
-    })
-    .join(" | ");
-
-    response.setHeader(
-    "Content-Type",
-    "text/plain; charset=utf-8",
-  );
-
-  return response
-    .status(200)
-    .send(
-      compactResult ||
-        "NO_AUDIO_OR_MEDIA_FIELDS_FOUND",
-    );
+}
