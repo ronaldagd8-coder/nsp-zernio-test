@@ -19,16 +19,19 @@ export default async function handler(request, response) {
     return response.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
-  if (
-    !secretsMatch(
-      request.headers["x-webhook-secret"],
-      process.env.INTERNAL_WEBHOOK_SECRET,
-    )
-  ) {
+  const receivedSecret =
+    request.headers["x-webhook-secret"] ?? request.body?.webhookSecret;
+
+  if (!secretsMatch(receivedSecret, process.env.INTERNAL_WEBHOOK_SECRET)) {
     return response.status(401).json({ ok: false, error: "Unauthorized" });
   }
 
-  const contactId = request.body?.contactId;
+  const contactId =
+    request.body?.contactId ??
+    request.body?.contact?.id ??
+    request.body?.sender?.contactId ??
+    request.body?.message?.sender?.contactId ??
+    request.body?.variables?.message?.sender?.contactId;
 
   if (typeof contactId !== "string" || contactId.length < 1 || contactId.length > 200) {
     return response.status(400).json({ ok: false, error: "A valid contactId is required" });
