@@ -450,7 +450,7 @@ export default async function handler(request, response) {
   const conversationId = extractConversationId(request.body);
   const currentMessage = extractCurrentMessage(request.body);
 
-  if (!contactIdentifier || !currentMessage) {
+  if (!contactIdentifier || (!currentMessage && !conversationId)) {
     return response.status(400).json({
       ok: false,
       error: "A valid contact and current message are required",
@@ -474,9 +474,26 @@ export default async function handler(request, response) {
       getRecentConversation(conversationId),
     ]);
 
+    const latestHistoryMessage = normalizeText(
+      history.at(-1)?.replace(/^(Customer|Assistant):\s*/, ""),
+    );
+
+    const effectiveCurrentMessage = currentMessage || latestHistoryMessage;
+
+    if (!effectiveCurrentMessage) {
+      return response.status(422).json({
+        ok: false,
+        error: "The current message could not be retrieved",
+      });
+    }
+
     const customFields = getCustomFields(contact);
     let state = normalizeState(customFields?.[BOOKING_FIELD_NAME]);
-    const analysis = await analyzeMessage({ currentMessage, history, state });
+    const analysis = await analyzeMessage({
+      currentMessage: effectiveCurrentMessage,
+      history,
+      state,
+    });
 
     const bookingContextActive = state.active || state.stage !== "idle";
     if (!analysis.bookingRelated && !bookingContextActive) {
