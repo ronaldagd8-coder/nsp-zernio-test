@@ -717,7 +717,7 @@ function isPastPreferredDate(preferredDate) {
   return dateSerial(parsed) < dateSerial(centralDateParts());
 }
 
-function keepSlotsNearPreferredDate(options, preferredDate) {
+function keepSlotsOnOrAfterPreferredDate(options, preferredDate) {
   const requested = parseIsoDate(preferredDate);
   if (!requested) return [];
 
@@ -726,10 +726,10 @@ function keepSlotsNearPreferredDate(options, preferredDate) {
       const start = new Date(option?.start);
       if (Number.isNaN(start.getTime())) return null;
       const distance = dateSerial(centralDateParts(start)) - dateSerial(requested);
-      return { option, distance };
+      return { option, distance, startTime: start.getTime() };
     })
-    .filter((entry) => entry && Math.abs(entry.distance) <= 1)
-    .sort((a, b) => Math.abs(a.distance) - Math.abs(b.distance) || a.distance - b.distance)
+    .filter((entry) => entry && entry.distance >= 0)
+    .sort((a, b) => a.startTime - b.startTime)
     .map((entry) => entry.option)
     .slice(0, 3);
 }
@@ -1100,7 +1100,7 @@ export default async function handler(request, response) {
     }
 
     const options = Array.isArray(availabilityResult.data?.options)
-      ? keepSlotsNearPreferredDate(availabilityResult.data.options, state.preferredDate)
+      ? keepSlotsOnOrAfterPreferredDate(availabilityResult.data.options, state.preferredDate)
       : [];
 
     if (!options.length) {
@@ -1114,8 +1114,8 @@ export default async function handler(request, response) {
         language,
         reply:
           language === "es"
-            ? "No encontré horarios disponibles para ese día ni para el día anterior o siguiente. ¿Qué otra fecha prefieres?"
-            : "I could not find availability on that date or on the day before or after. What other date would you prefer?",
+            ? "No encontré horarios disponibles a partir de esa fecha. ¿Qué otra fecha prefieres?"
+            : "I could not find availability starting on that date. What other date would you prefer?",
         stage: state.stage,
       });
     }
