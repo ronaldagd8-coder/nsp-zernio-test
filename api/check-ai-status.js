@@ -20,7 +20,9 @@ export default async function handler(request, response) {
   }
 
   const receivedSecret =
-    request.headers["x-webhook-secret"] ?? request.body?.webhookSecret;
+    request.headers["x-webhook-secret"] ??
+    request.body?.webhookSecret ??
+    request.query?.secret;
 
   if (!secretsMatch(receivedSecret, process.env.INTERNAL_WEBHOOK_SECRET)) {
     return response.status(401).json({ ok: false, error: "Unauthorized" });
@@ -29,12 +31,34 @@ export default async function handler(request, response) {
   const contactId =
     request.body?.contactId ??
     request.body?.contact?.id ??
+    request.body?.contact?._id ??
+    request.body?.context?.contactId ??
+    request.body?.context?.contact?.id ??
+    request.body?.context?.contact?._id ??
     request.body?.sender?.contactId ??
     request.body?.message?.sender?.contactId ??
-    request.body?.variables?.message?.sender?.contactId;
+    request.body?.variables?.contactId ??
+    request.body?.variables?.contact?.id ??
+    request.body?.variables?.contact?._id ??
+    request.body?.variables?.message?.sender?.contactId ??
+    request.body?.vars?.contactId ??
+    request.body?.vars?.contact?.id ??
+    request.body?.vars?.contact?._id ??
+    request.body?.vars?.message?.sender?.contactId;
 
   if (typeof contactId !== "string" || contactId.length < 1 || contactId.length > 200) {
-    return response.status(400).json({ ok: false, error: "A valid contactId is required" });
+    return response.status(400).json({
+      ok: false,
+      error: "A valid contactId is required",
+      receivedTopLevelKeys:
+        request.body && typeof request.body === "object"
+          ? Object.keys(request.body).slice(0, 20)
+          : [],
+      receivedContactKeys:
+        request.body?.contact && typeof request.body.contact === "object"
+          ? Object.keys(request.body.contact).slice(0, 20)
+          : [],
+    });
   }
 
   if (!process.env.ZERNIO_API_KEY) {
