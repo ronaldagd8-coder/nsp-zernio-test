@@ -1,4 +1,4 @@
-
+import { timingSafeEqual } from "node:crypto";
 
 const ZERNIO_API_BASE_URL = "https://zernio.com/api/v1";
 const OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
@@ -723,6 +723,31 @@ export default async function handler(request, response) {
     const bookingContextActive = state.active || state.stage !== "idle";
     if (!analysis.bookingRelated && !bookingContextActive) {
       return response.status(200).json({ ok: true, handled: false, stage: "idle" });
+    }
+
+    if (state.stage === "confirmed") {
+      if (!analysis.bookingRelated && !analysis.changeOrCancelExisting) {
+        return response.status(200).json({
+          ok: true,
+          handled: false,
+          stage: state.stage,
+        });
+      }
+
+      const confirmedLanguage =
+        analysis.language === "es" ? "es" : state.language === "es" ? "es" : "en";
+
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        handoffRequired: true,
+        language: confirmedLanguage,
+        reply:
+          confirmedLanguage === "es"
+            ? "Tu visita ya está confirmada. Para cambiarla, cancelarla o solicitar otra visita, un miembro del equipo debe ayudarte personalmente."
+            : "Your site visit is already confirmed. A team member must assist you personally to change it, cancel it, or request another visit.",
+        stage: state.stage,
+      });
     }
 
     if (!analysis.bookingRelated && state.stage === "pending_approval") {
