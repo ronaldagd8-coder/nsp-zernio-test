@@ -652,6 +652,88 @@ function askForField(field, language, state = {}) {
   return (language === "es" ? es : en)[field];
 }
 
+function parseIsoDate(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(normalizeText(value, 20));
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) return null;
+  return { year, month, day, date };
+}
+
+function centralDateParts(value = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value);
+  const get = (type) => Number(parts.find((part) => part.type === type)?.value);
+  return { year: get("year"), month: get("month"), day: get("day") };
+}
+
+function dateSerial(parts) {
+  return Date.UTC(parts.year, parts.month - 1, parts.day) / 86400000;
+}
+
+function hasConflictingExplicitDate(message, preferredDate) {
+  const parsed = parseIsoDate(preferredDate);
+  if (!parsed) return true;
+
+  const normalized = normalizeForIntent(message);
+  const weekdays = [
+    [0, /\b(domingo|sunday)\b/],
+    [1, /\b(lunes|monday)\b/],
+    [2, /\b(martes|tuesday)\b/],
+    [3, /\b(miercoles|wednesday)\b/],
+    [4, /\b(jueves|thursday)\b/],
+    [5, /\b(viernes|friday)\b/],
+    [6, /\b(sabado|saturday)\b/],
+  ];
+  const statedWeekday = weekdays.find(([, pattern]) => pattern.test(normalized));
+  if (statedWeekday && parsed.date.getUTCDay() !== statedWeekday[0]) return true;
+
+  const months = [
+    [1, /\b(enero|january)\b/], [2, /\b(febrero|february)\b/],
+    [3, /\b(marzo|march)\b/], [4, /\b(abril|april)\b/],
+    [5, /\b(mayo|may)\b/], [6, /\b(junio|june)\b/],
+    [7, /\b(julio|july)\b/], [8, /\b(agosto|august)\b/],
+    [9, /\b(septiembre|setiembre|september)\b/], [10, /\b(octubre|october)\b/],
+    [11, /\b(noviembre|november)\b/], [12, /\b(diciembre|december)\b/],
+  ];
+  const statedMonth = months.find(([, pattern]) => pattern.test(normalized));
+  return Boolean(statedMonth && parsed.month !== statedMonth[0]);
+}
+
+function isPastPreferredDate(preferredDate) {
+  const parsed = parseIsoDate(preferredDate);
+  if (!parsed) return true;
+  return dateSerial(parsed) < dateSerial(centralDateParts());
+}
+
+function keepSlotsNearPreferredDate(options, preferredDate) {
+  const requested = parseIsoDate(preferredDate);
+  if (!requested) return [];
+
+  return options
+    .map((option) => {
+      const start = new Date(option?.start);
+      if (Number.isNaN(start.getTime())) return null;
+      const distance = dateSerial(centralDateParts(start)) - dateSerial(requested);
+      return { option, distance };
+    })
+    .filter((entry) => entry && Math.abs(entry.distance) <= 1)
+    .sort((a, b) => Math.abs(a.distance) - Math.abs(b.distance) || a.distance - b.distance)
+    .map((entry) => entry.option)
+    .slice(0, 3);
+}
+
 function availabilityReply(options, language) {
   const lines = options.map((option, index) => `${index + 1}. ${option.display}`);
   return language === "es"
@@ -973,6 +1055,26 @@ export default async function handler(request, response) {
       });
     }
 
+    if (
+      isPastPreferredDate(state.preferredDate) ||
+      hasConflictingExplicitDate(effectiveCurrentMessage, state.preferredDate)
+    ) {
+      state.preferredDate = null;
+      state.preferredPeriod = null;
+      state.stage = "collecting_preference";
+      await saveState(contactId, state);
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        language,
+        reply:
+          language === "es"
+            ? "Quiero confirmar la fecha porque el día de la semana y la fecha indicada no parecen coincidir, o esa fecha ya pasó. ¿Cuál es la fecha correcta para la visita? Por ejemplo: miércoles 2 de septiembre."
+            : "I want to confirm the date because the weekday and date provided do not appear to match, or that date has already passed. What is the correct date for the visit? For example: Wednesday, September 2.",
+        stage: state.stage,
+      });
+    }
+
     if (!state.preferredPeriod) {
       state.stage = "collecting_preference";
       await saveState(contactId, state);
@@ -998,7 +1100,7 @@ export default async function handler(request, response) {
     }
 
     const options = Array.isArray(availabilityResult.data?.options)
-      ? availabilityResult.data.options.slice(0, 3)
+      ? keepSlotsNearPreferredDate(availabilityResult.data.options, state.preferredDate)
       : [];
 
     if (!options.length) {
@@ -1012,8 +1114,8 @@ export default async function handler(request, response) {
         language,
         reply:
           language === "es"
-            ? "No encontré horarios disponibles cerca de esa fecha. ¿Qué otra fecha prefieres?"
-            : "I could not find availability near that date. What other date would you prefer?",
+            ? "No encontré horarios disponibles para ese día ni para el día anterior o siguiente. ¿Qué otra fecha prefieres?"
+            : "I could not find availability on that date or on the day before or after. What other date would you prefer?",
         stage: state.stage,
       });
     }
