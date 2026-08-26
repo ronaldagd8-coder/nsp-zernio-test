@@ -8,7 +8,66 @@ function secretsMatch(receivedSecret, expectedSecret) {
   const received = Buffer.from(receivedSecret);
   const expected = Buffer.from(expectedSecret);
 
-  return received.length === expected.length && timingSafeEqual(received, expected);
+  return (
+    received.length === expected.length &&
+    timingSafeEqual(received, expected)
+  );
+}
+
+function normalizePhone(value) {
+  return String(value ?? "").replace(/\D/g, "");
+}
+
+async function zernioFetch(path, options = {}) {
+  return fetch(`${ZERNIO_API_BASE_URL}${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${process.env.ZERNIO_API_KEY}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+  });
+}
+
+async function resolveContactId(identifier) {
+  if (!identifier) return null;
+
+  const directResponse = await zernioFetch(
+    `/contacts/${encodeURIComponent(identifier)}`,
+  );
+
+  if (directResponse.ok) {
+    const directData = await directResponse.json();
+    return directData?.contact?.id ?? identifier;
+  }
+
+  const targetPhone = normalizePhone(identifier);
+  if (!targetPhone) return null;
+
+  const listResponse = await zernioFetch(
+    "/contacts?platform=whatsapp&limit=200",
+  );
+
+  if (!listResponse.ok) {
+    return null;
+  }
+
+  const listData = await listResponse.json();
+
+  const contact = listData?.contacts?.find((candidate) => {
+    const candidateNumbers = [
+      candidate?.phone,
+      candidate?.platformIdentifier,
+      candidate?.displayIdentifier,
+    ]
+      .map(normalizePhone)
+      .filter(Boolean);
+
+    return candidateNumbers.includes(targetPhone);
+  });
+
+  return contact?.id ?? null;
 }
 
 export default async function handler(request, response) {
@@ -16,7 +75,10 @@ export default async function handler(request, response) {
 
   if (request.method !== "POST") {
     response.setHeader("Allow", "POST");
-    return response.status(405).json({ ok: false, error: "Method not allowed" });
+    return response.status(405).json({
+      ok: false,
+      error: "Method not allowed",
+    });
   }
 
   const receivedSecret =
@@ -24,77 +86,113 @@ export default async function handler(request, response) {
     request.body?.webhookSecret ??
     request.query?.secret;
 
-  if (!secretsMatch(receivedSecret, process.env.INTERNAL_WEBHOOK_SECRET)) {
-    return response.status(401).json({ ok: false, error: "Unauthorized" });
+  if (
+    !secretsMatch(
+      receivedSecret,
+      process.env.INTERNAL_WEBHOOK_SECRET,
+    )
+  ) {
+    return response.status(401).json({
+      ok: false,
+      error: "Unauthorized",
+    });
   }
 
-  const contactId =
+  if (!process.env.ZERNIO_API_KEY) {
+    return response.status(500).json({
+      ok: false,
+      error: "Server configuration error",
+    });
+  }
+
+  const directContactId =
     request.body?.contactId ??
     request.body?.contact?.id ??
     request.body?.contact?._id ??
+    request.body?.contact?.contactId ??
     request.body?.context?.contactId ??
     request.body?.context?.contact?.id ??
-    request.body?.context?.contact?._id ??
     request.body?.sender?.contactId ??
     request.body?.message?.sender?.contactId ??
     request.body?.variables?.contactId ??
     request.body?.variables?.contact?.id ??
     request.body?.variables?.contact?._id ??
-    request.body?.variables?.message?.sender?.contactId ??
     request.body?.vars?.contactId ??
     request.body?.vars?.contact?.id ??
-    request.body?.vars?.contact?._id ??
-    request.body?.vars?.message?.sender?.contactId;
+    request.body?.vars?.contact?._id;
 
-  if (typeof contactId !== "string" || contactId.length < 1 || contactId.length > 200) {
+  const phoneIdentifier =
+    request.body?.contact?.phone ??
+    request.body?.contact?.platformIdentifier ??
+    request.body?.contact?.displayIdentifier ??
+    request.body?.phone ??
+    request.body?.sender?.phone ??
+    request.body?.message?.sender?.phone ??
+    request.body?.variables?.contact?.phone ??
+    request.body?.vars?.contact?.phone;
+
+  const identifier =
+    typeof directContactId === "string" && directContactId.trim()
+      ? directContactId.trim()
+      : String(phoneIdentifier ?? "").trim();
+
+  if (!identifier || identifier.length > 200) {
     return response.status(400).json({
       ok: false,
-      error: "A valid contactId is required",
-      receivedTopLevelKeys:
-        request.body && typeof request.body === "object"
-          ? Object.keys(request.body).slice(0, 20)
-          : [],
-      receivedContactKeys:
-        request.body?.contact && typeof request.body.contact === "object"
-          ? Object.keys(request.body.contact).slice(0, 20)
-          : [],
+      error: "No valid contact ID or phone number was received",
     });
   }
 
-  if (!process.env.ZERNIO_API_KEY) {
-    return response.status(500).json({ ok: false, error: "Server configuration error" });
-  }
-
   try {
-    const zernioResponse = await fetch(
-      `${ZERNIO_API_BASE_URL}/contacts/${encodeURIComponent(contactId)}`,
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.ZERNIO_API_KEY}`,
-          Accept: "application/json",
-        },
-      },
-    );
+    const contactId = await resolveContactId(identifier);
 
-    if (!zernioResponse.ok) {
-      console.error("Zernio contact lookup failed", {
-        status: zernioResponse.status,
+    if (!contactId) {
+      return response.status(404).json({
+        ok: false,
+        error: "Contact not found",
       });
-      return response.status(502).json({ ok: false, error: "Contact lookup failed" });
     }
 
-    const data = await zernioResponse.json();
-    const aiStatus = data?.contact?.customFields?.ai_status ?? null;
+    const contactResponse = await zernioFetch(
+      `/contacts/${encodeURIComponent(contactId)}`,
+    );
+
+    if (!contactResponse.ok) {
+      console.error("Zernio contact lookup failed", {
+        status: contactResponse.status,
+      });
+
+      return response.status(502).json({
+        ok: false,
+        error: "Contact lookup failed",
+      });
+    }
+
+    const data = await contactResponse.json();
+    const contact = data?.contact ?? data;
+
+    const aiStatus =
+      contact?.customFields?.ai_status ??
+      contact?.metadata?.customFields?.ai_status ??
+      null;
 
     return response.status(200).json({
       ok: true,
       paused: aiStatus === "human",
       status: aiStatus,
+      contactId,
     });
   } catch (error) {
     console.error("Unexpected contact lookup error", {
-      message: error instanceof Error ? error.message : "Unknown error",
+      message:
+        error instanceof Error
+          ? error.message
+          : "Unknown error",
     });
-    return response.status(502).json({ ok: false, error: "Contact lookup failed" });
+
+    return response.status(502).json({
+      ok: false,
+      error: "Contact lookup failed",
+    });
   }
 }
