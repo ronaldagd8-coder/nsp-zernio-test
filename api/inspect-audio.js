@@ -169,9 +169,37 @@ export default async function handler(request, response) {
 
   const findings = inspectPayload(body);
 
-  return response.status(200).json({
-    ok: true,
-    topLevelKeys: Object.keys(body).slice(0, 30),
-    findings,
+    const prioritizedFindings = findings.sort((a, b) => {
+    const score = (item) => {
+      const path = String(item.path ?? "").toLowerCase();
+
+      if (path.includes("attachment")) return 1;
+      if (path.includes("audio")) return 2;
+      if (path.includes("media")) return 3;
+      if (path.includes("accountid")) return 4;
+
+      return 5;
+    };
+
+    return score(a) - score(b);
   });
-}
+
+  const compactResult = prioritizedFindings
+    .slice(0, 15)
+    .map((item) => {
+      const detail =
+        item.value ??
+        item.pathname ??
+        item.keys?.join(",") ??
+        item.itemCount ??
+        item.valueType ??
+        "found";
+
+      return `${item.path}=${detail}`;
+    })
+    .join(" | ");
+
+  return response
+    .status(200)
+    .setHeader("Content-Type", "text/plain")
+    .send(compactResult || "NO_AUDIO_OR_MEDIA_FIELDS_FOUND");
