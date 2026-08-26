@@ -6,7 +6,8 @@ Initial endpoints:
 
 - `GET /` - service status
 - `GET /health` - health check
+- `POST /api/check-ai-status` - authenticated Zernio contact status lookup
 
-The Zernio status-check and reactivation endpoints will be added after the first verified Vercel deployment.
+The reactivation endpoints will be added after the status-check integration is verified.
 
 Do not commit API keys or webhook secrets to this repository.
