@@ -3,7 +3,9 @@ import { timingSafeEqual } from "node:crypto";
 const ZERNIO_API_BASE_URL = "https://zernio.com/api/v1";
 
 function secretsMatch(receivedSecret, expectedSecret) {
-  if (!receivedSecret || !expectedSecret) return false;
+  if (!receivedSecret || !expectedSecret) {
+    return false;
+  }
 
   const received = Buffer.from(receivedSecret);
   const expected = Buffer.from(expectedSecret);
@@ -15,7 +17,9 @@ function secretsMatch(receivedSecret, expectedSecret) {
 }
 
 function safeUrlPath(value) {
-  if (typeof value !== "string") return null;
+  if (typeof value !== "string") {
+    return null;
+  }
 
   try {
     return new URL(value).pathname;
@@ -36,6 +40,62 @@ function extractMessages(data) {
     candidates.find((candidate) =>
       Array.isArray(candidate),
     ) ?? []
+  );
+}
+
+function extractAccounts(data) {
+  const candidates = [
+    data?.accounts,
+    data?.data?.accounts,
+    data?.data,
+    data?.items,
+  ];
+
+  return (
+    candidates.find((candidate) =>
+      Array.isArray(candidate),
+    ) ?? []
+  );
+}
+
+async function resolveWhatsAppAccountId() {
+  const accountsResponse = await fetch(
+    `${ZERNIO_API_BASE_URL}/accounts?platform=whatsapp`,
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.ZERNIO_API_KEY}`,
+        Accept: "application/json",
+      },
+    },
+  );
+
+  if (!accountsResponse.ok) {
+    return null;
+  }
+
+  const accountsData = await accountsResponse.json();
+  const accounts = extractAccounts(accountsData);
+
+  const whatsappAccounts = accounts.filter(
+    (account) =>
+      String(account?.platform ?? "").toLowerCase() ===
+      "whatsapp",
+  );
+
+  const preferredAccount =
+    whatsappAccounts.find((account) =>
+      ["active", "live", "connected"].includes(
+        String(account?.status ?? "").toLowerCase(),
+      ),
+    ) ??
+    whatsappAccounts[0] ??
+    null;
+
+  return (
+    preferredAccount?.id ??
+    preferredAccount?._id ??
+    preferredAccount?.accountId ??
+    null
   );
 }
 
@@ -68,10 +128,7 @@ export default async function handler(request, response) {
     });
   }
 
-  if (
-    !process.env.ZERNIO_API_KEY ||
-    !process.env.ZERNIO_WHATSAPP_ACCOUNT_ID
-  ) {
+  if (!process.env.ZERNIO_API_KEY) {
     return response.status(500).json({
       ok: false,
       error: "Server configuration error",
@@ -91,16 +148,19 @@ export default async function handler(request, response) {
     return response.status(400).json({
       ok: false,
       error: "A valid conversationId is required",
-      topLevelKeys:
-        request.body && typeof request.body === "object"
-          ? Object.keys(request.body).slice(0, 20)
-          : [],
     });
   }
 
   try {
     const accountId =
-      process.env.ZERNIO_WHATSAPP_ACCOUNT_ID;
+      await resolveWhatsAppAccountId();
+
+    if (!accountId) {
+      return response.status(502).json({
+        zernioError:
+          "No connected WhatsApp account was found",
+      });
+    }
 
     const messagesResponse = await fetch(
       `${ZERNIO_API_BASE_URL}/inbox/conversations/${encodeURIComponent(
@@ -116,7 +176,8 @@ export default async function handler(request, response) {
       },
     );
 
-    const responseText = await messagesResponse.text();
+    const responseText =
+      await messagesResponse.text();
 
     let data;
 
@@ -126,17 +187,12 @@ export default async function handler(request, response) {
       data = null;
     }
 
-        if (!messagesResponse.ok) {
-      console.error("Zernio latest-message lookup failed", {
-        status: messagesResponse.status,
-        code: data?.code ?? null,
-      });
-
-            return response.status(502).json({
+    if (!messagesResponse.ok) {
+      return response.status(502).json({
         zernioError:
           typeof data?.error === "string"
             ? data.error.slice(0, 300)
-            : "Unknown Zernio error",
+            : "Latest-message lookup failed",
         code:
           typeof data?.code === "string"
             ? data.code.slice(0, 100)
@@ -160,7 +216,8 @@ export default async function handler(request, response) {
             ? Object.keys(data).slice(0, 20)
             : [],
         dataKeys:
-          data?.data && typeof data.data === "object"
+          data?.data &&
+          typeof data.data === "object"
             ? Object.keys(data.data).slice(0, 20)
             : [],
       });
@@ -179,14 +236,16 @@ export default async function handler(request, response) {
         latestMessage?.messageId ??
         latestMessage?.platformMessageId ??
         null,
-      direction: latestMessage?.direction ?? null,
+      direction:
+        latestMessage?.direction ?? null,
       type:
         latestMessage?.type ??
         latestMessage?.messageType ??
         null,
       attachmentCount: attachments.length,
-      attachments: attachments.slice(0, 5).map(
-        (attachment) => ({
+      attachments: attachments
+        .slice(0, 5)
+        .map((attachment) => ({
           type: attachment?.type ?? null,
           mimeType:
             attachment?.mimeType ??
@@ -200,19 +259,24 @@ export default async function handler(request, response) {
           payloadKeys:
             attachment?.payload &&
             typeof attachment.payload === "object"
-              ? Object.keys(attachment.payload).slice(0, 20)
+              ? Object.keys(
+                  attachment.payload,
+                ).slice(0, 20)
               : [],
-          urlPath: safeUrlPath(attachment?.url),
-        }),
-      ),
+          urlPath:
+            safeUrlPath(attachment?.url),
+        })),
     });
   } catch (error) {
-    console.error("Unexpected latest-message lookup error", {
-      message:
-        error instanceof Error
-          ? error.message
-          : "Unknown error",
-    });
+    console.error(
+      "Unexpected latest-message lookup error",
+      {
+        message:
+          error instanceof Error
+            ? error.message
+            : "Unknown error",
+      },
+    );
 
     return response.status(502).json({
       ok: false,
