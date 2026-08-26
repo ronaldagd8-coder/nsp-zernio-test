@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+
 
 const ZERNIO_API_BASE_URL = "https://zernio.com/api/v1";
 const OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
@@ -544,22 +544,52 @@ function applyUpdates(state, analysis) {
   return next;
 }
 
+function isCompleteProjectAddress(value) {
+  const address = normalizeText(value, 500);
+  if (address.length < 10) return false;
+  if (!/\d/.test(address)) return false;
+  if (!/[a-zA-Z]{2,}/.test(address)) return false;
+  if (/^p\.?\s*o\.?\s*box\b/i.test(address)) return false;
+  return /\b\d{1,8}[a-zA-Z]?\s+\S+/i.test(address);
+}
+
+function isSpecificPropertyType(value) {
+  const propertyType = normalizeForIntent(value);
+  if (!propertyType) return false;
+  const genericValues = new Set([
+    "comercial",
+    "commercial",
+    "propiedad comercial",
+    "commercial property",
+    "espacio comercial",
+    "commercial space",
+    "negocio",
+    "business",
+    "local",
+  ]);
+  return !genericValues.has(propertyType);
+}
+
 function missingRequiredFields(state) {
-  const required = ["customerName", "propertyType", "projectAddress", "projectScope"];
-  return required.filter((field) => !normalizeText(state[field]));
+  const missing = [];
+  if (!normalizeText(state.customerName)) missing.push("customerName");
+  if (!isSpecificPropertyType(state.propertyType)) missing.push("propertyType");
+  if (!isCompleteProjectAddress(state.projectAddress)) missing.push("projectAddress");
+  if (!normalizeText(state.projectScope)) missing.push("projectScope");
+  return missing;
 }
 
 function askForField(field, language) {
   const es = {
     customerName: "Para preparar la solicitud, ¿me indicas tu nombre?",
     propertyType: "¿Qué tipo de propiedad o negocio comercial es? Por ejemplo, restaurante, oficina o tienda.",
-    projectAddress: "¿Cuál es la dirección completa de la propiedad comercial donde sería la visita? La necesito para poder solicitar la cita.",
+    projectAddress: "¿Cuál es la dirección física completa de la propiedad comercial? Incluye número, calle, ciudad, estado y código postal si lo tienes. Necesitamos la ubicación exacta para poder solicitar la visita.",
     projectScope: "¿Qué trabajo necesitas que revisemos durante la visita?",
   };
   const en = {
     customerName: "To prepare the request, may I have your name?",
     propertyType: "What type of commercial property or business is it, such as a restaurant, office, or retail store?",
-    projectAddress: "What is the complete address of the commercial property? I need it to request the appointment.",
+    projectAddress: "What is the complete physical address of the commercial property? Please include the street number, street name, city, state, and ZIP code if available. We need the exact location to request the visit.",
     projectScope: "What work would you like us to review during the visit?",
   };
   return (language === "es" ? es : en)[field];
