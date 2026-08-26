@@ -199,7 +199,14 @@ export default async function handler(request, response) {
     })
     .join(" | ");
 
+    response.setHeader(
+    "Content-Type",
+    "text/plain; charset=utf-8",
+  );
+
   return response
     .status(200)
-    .setHeader("Content-Type", "text/plain")
-    .send(compactResult || "NO_AUDIO_OR_MEDIA_FIELDS_FOUND");
+    .send(
+      compactResult ||
+        "NO_AUDIO_OR_MEDIA_FIELDS_FOUND",
+    );
