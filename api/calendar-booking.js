@@ -234,6 +234,36 @@ function formatAppointment(start) {
   return { dateLabel, timeLabel, display: `${dateLabel} at ${timeLabel} Central Time` };
 }
 
+async function listKnownProperties({ accessToken, calendarId, contactIdentifier }) {
+  const query = new URLSearchParams({
+    singleEvents: "true",
+    orderBy: "startTime",
+    privateExtendedProperty: `contactIdentifier=${contactIdentifier}`,
+    maxResults: "250",
+  });
+  const calendarResponse = await googleCalendarFetch(
+    `/calendars/${encodeURIComponent(calendarId)}/events?${query}`,
+    accessToken,
+  );
+  if (!calendarResponse.ok) {
+    throw new Error(`Property history lookup failed: ${calendarResponse.status}`);
+  }
+  const data = await calendarResponse.json();
+  const unique = new Map();
+  for (const event of data.items ?? []) {
+    const address = normalizeText(event.location, 500);
+    if (!address) continue;
+    const key = address.toLowerCase().replace(/\s+/g, " ");
+    const privateData = event.extendedProperties?.private ?? {};
+    unique.set(key, {
+      address,
+      propertyType: normalizeText(privateData.propertyType, 200) || null,
+      lastVisit: event.start?.dateTime ?? event.start?.date ?? null,
+    });
+  }
+  return [...unique.values()].reverse().slice(0, 20);
+}
+
 export default async function handler(request, response) {
   response.setHeader("Cache-Control", "no-store");
 
@@ -277,6 +307,24 @@ export default async function handler(request, response) {
   );
   const language = normalizeText(request.body?.language ?? booking.language, 10) === "es" ? "es" : "en";
   const email = normalizeEmail(request.body?.email ?? booking.email);
+
+  if (request.body?.action === "list_properties") {
+    if (!contactIdentifier) {
+      return response.status(400).json({ ok: false, error: "A contactIdentifier is required" });
+    }
+    try {
+      const accessToken = await getGoogleAccessToken();
+      const properties = await listKnownProperties({
+        accessToken,
+        calendarId: process.env.GOOGLE_CALENDAR_ID,
+        contactIdentifier,
+      });
+      return response.status(200).json({ ok: true, properties });
+    } catch (error) {
+      console.error("Property history lookup failed", error);
+      return response.status(502).json({ ok: false, error: "Property history could not be loaded" });
+    }
+  }
 
   const required = { customerName, propertyType, projectAddress, projectScope, selectedStart, contactIdentifier, conversationId };
   const missingFields = Object.entries(required)
@@ -366,6 +414,7 @@ export default async function handler(request, response) {
       end: { dateTime: end.toISOString(), timeZone: TIME_ZONE },
       extendedProperties: {
         private: {
+          bookingId: bookingKey,
           bookingKey,
           source: "nsp_zernio_assistant",
           bookingStatus: "pending_approval",
@@ -375,6 +424,7 @@ export default async function handler(request, response) {
           language,
           customerName,
           customerEmail: email || "",
+          propertyType,
         },
       },
     };
