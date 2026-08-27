@@ -785,20 +785,77 @@ function getCustomFields(contact) {
   return contact?.customFields ?? contact?.metadata?.customFields ?? {};
 }
 
-function getContactPhone(contact) {
+function normalizePhoneForDisplay(value) {
+  const raw = normalizeText(
+    value === null || value === undefined ? "" : String(value),
+    100,
+  )
+    .replace(/^(?:whatsapp|wa)\s*:/i, "")
+    .trim();
+  if (!raw || !/^\+?[\d\s().-]{7,30}$/.test(raw)) return "";
+
+  const digits = normalizePhone(raw);
+  if (digits.length < 7 || digits.length > 15) return "";
+  if (raw.startsWith("+")) return `+${digits}`;
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length >= 11) return `+${digits}`;
+  return digits;
+}
+
+function collectContactPhoneCandidates(value, depth = 0, results = []) {
+  if (!value || typeof value !== "object" || depth > 7 || results.length >= 40) {
+    return results;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 30)) {
+      collectContactPhoneCandidates(item, depth + 1, results);
+    }
+    return results;
+  }
+
+  const typedAsPhone = /\b(whatsapp|phone|telephone|mobile|sms)\b/.test(
+    normalizeForIntent(
+      value.type ?? value.platform ?? value.channel ?? value.kind ?? "",
+    ),
+  );
+
+  for (const [key, nestedValue] of Object.entries(value)) {
+    const phoneKey = /^(phone|phoneNumber|mobile|mobileNumber|waId|wa_id|platformIdentifier|displayIdentifier)$/i.test(
+      key,
+    );
+    const typedValueKey =
+      typedAsPhone && /^(value|identifier|address|username|number|id)$/i.test(key);
+
+    if (
+      (phoneKey || typedValueKey) &&
+      (typeof nestedValue === "string" || typeof nestedValue === "number")
+    ) {
+      const candidate = normalizeText(String(nestedValue), 100);
+      if (candidate && !results.includes(candidate)) results.push(candidate);
+    }
+
+    if (nestedValue && typeof nestedValue === "object") {
+      collectContactPhoneCandidates(nestedValue, depth + 1, results);
+    }
+  }
+
+  return results;
+}
+
+function getContactPhone(contact, fallbackIdentifiers = []) {
   const candidates = [
     contact?.phone,
     contact?.phoneNumber,
     contact?.platformIdentifier,
     contact?.displayIdentifier,
     contact?.metadata?.phone,
+    ...collectContactPhoneCandidates(contact),
+    ...fallbackIdentifiers,
   ];
 
   for (const candidate of candidates) {
-    const normalized = normalizeText(
-      candidate === null || candidate === undefined ? "" : String(candidate),
-      100,
-    );
+    const normalized = normalizePhoneForDisplay(candidate);
     if (normalized) return normalized;
   }
 
@@ -1829,7 +1886,7 @@ export default async function handler(request, response) {
         selectedStart: state.selectedStart,
         contactIdentifier: contactId,
         conversationId,
-        whatsappNumber: getContactPhone(contact),
+        whatsappNumber: getContactPhone(contact, contactCandidates),
         email: state.email,
         language,
       });
