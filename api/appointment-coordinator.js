@@ -180,6 +180,28 @@ function serviceScopeLabel(service, language) {
   return pair ? pair[language === "es" ? 0 : 1] : null;
 }
 
+function specificIncludedScopeLabel(value, language) {
+  const text = normalizeForIntent(value);
+  if (!text) return null;
+
+  if (/\b(aire acondicionado|air conditioning|a\/c|ac unit|ac system)\b/.test(text)) {
+    const asksForReview =
+      /\b(revisar|revisen|vean|chequear|inspeccionar|check|inspect|look at)\b/.test(text);
+    if (language === "es") {
+      return asksForReview ? "revisar el aire acondicionado" : "aire acondicionado";
+    }
+    return asksForReview
+      ? "inspect the air-conditioning system"
+      : "air-conditioning work";
+  }
+
+  if (/\b(refrigeracion|refrigeration|walk-in cooler|walk in cooler)\b/.test(text)) {
+    return language === "es" ? "refrigeración" : "refrigeration work";
+  }
+
+  return null;
+}
+
 function extractExplicitIncludedService(value, language) {
   const text = normalizeForIntent(value).replace(/[.!?]+$/g, "").trim();
   const match = /^(?:(?:quiero|deseo|necesito)\s+)?(?:incluir|agregar|anadir|incluye|agrega|include|add)\s+(?:la |el |the )?(.+?)(?:\s+(?:en|para)\s+(?:la\s+)?(?:visita|solicitud|cita|reserva)|\s+(?:to|in|for)\s+(?:the\s+)?(?:visit|request|appointment|booking))?$/.exec(text);
@@ -194,10 +216,54 @@ function extractExplicitIncludedService(value, language) {
     );
   if (!hasInclusionIntent) return null;
 
+  const specificScope = specificIncludedScopeLabel(text, language);
+  if (specificScope) return specificScope;
+
   const confirmedService = detectConfirmedCommercialService(text);
   return confirmedService
     ? serviceScopeLabel(confirmedService, language === "es" ? "es" : "en")
     : null;
+}
+
+function inferPropertyTypeFromMessage(value, language) {
+  const text = normalizeForIntent(value);
+  if (!text) return null;
+
+  const propertyTypes = [
+    [/\b(oficina|office)\b/, ["oficina", "office"]],
+    [/\b(restaurante|restaurant)\b/, ["restaurante", "restaurant"]],
+    [/\b(tienda|retail store|storefront|store)\b/, ["tienda", "retail store"]],
+    [/\b(almacen|bodega|warehouse)\b/, ["almacén", "warehouse"]],
+    [/\b(hotel|motel)\b/, ["hotel", "hotel"]],
+    [/\b(iglesia|church)\b/, ["iglesia", "church"]],
+    [/\b(escuela|colegio|school)\b/, ["escuela", "school"]],
+    [/\b(clinica|consultorio|clinic|medical office|dental office)\b/, ["consultorio", "medical office"]],
+  ];
+
+  const matched = propertyTypes.find(([pattern]) => pattern.test(text));
+  return matched ? matched[1][language === "es" ? 0 : 1] : null;
+}
+
+function normalizeProjectScope(value, propertyType) {
+  let scope = normalizeText(value, 2000);
+  if (!scope) return "";
+
+  scope = scope
+    .replace(/\b(?:uno|una|un)\s+toma\s*corrientes?\b/gi, "un tomacorriente")
+    .replace(/\btoma\s*corrientes?\b/gi, "tomacorriente")
+    .replace(/\b(?:one|an?)\s+electrical outlet\b/gi, "an electrical outlet")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const normalizedProperty = normalizeForIntent(propertyType);
+  if (normalizedProperty === "oficina" || normalizedProperty === "office") {
+    scope = scope
+      .replace(/\s+en\s+(?:mi\s+|la\s+)?oficina\s*$/i, "")
+      .replace(/\s+in\s+(?:my\s+|the\s+)?office\s*$/i, "")
+      .trim();
+  }
+
+  return scope;
 }
 
 function mergeProjectScopes(currentScope, includedService, language = "es") {
@@ -293,9 +359,16 @@ function declinesEmail(value) {
 function isClearlyOutOfScopeService(value) {
   const text = normalizeForIntent(value);
   if (!text) return false;
-  return /\b(tapizar|tapizado|tapiceria|retapizar|upholster|upholstery|reupholster|reupholstery|reparar (una |varias )?sillas?|reparacion de (una |varias )?sillas?|repair (a |the )?chairs?|chair repair|reparar muebles?|reparacion de muebles?|furniture repair)\b/.test(
+  return /\b(tapizar|tapizado|tapiceria|retapizar|upholster|upholstery|reupholster|reupholstery|reparar (una |varias )?sillas?|reparacion de (una |varias )?sillas?|repair (a |the )?chairs?|chair repair|reparar muebles?|reparacion de muebles?|furniture repair|limpieza general|limpieza de pisos?|servicio de limpieza|servicios de limpieza|conserjeria|aseo general|janitorial|general cleaning|floor cleaning|housekeeping|maid service)\b/.test(
     text,
   );
+}
+
+function isReviewableCommercialSupportService(value) {
+  const text = normalizeForIntent(value);
+  if (!text) return false;
+  return /\b(limpieza|cleaning|desengrase|degreasing|mantenimiento|maintenance)\b/.test(text) &&
+    /\b(campana|campanas|hood|hoods|cocina industrial|cocinas industriales|commercial kitchen|commercial kitchens|kitchen exhaust|extractor de cocina|extractores de cocina)\b/.test(text);
 }
 
 function isWebsiteDevelopmentRequest(value) {
@@ -812,7 +885,10 @@ Determine whether the customer's CURRENT message is related to requesting, selec
 If booking state is already active, interpret short answers in that scheduling context.
 Extract only information actually stated or clearly established in the conversation. Never invent an address, name, date, time, property type, scope, company, or confirmation.
 NEXT SOLUTIONS PARTNERS handles commercial construction and building-related work, including new construction, renovations, remodeling, tenant improvements, build-outs, additions, demolition, repairs, and maintenance. Relevant trades and components may include electrical, plumbing, HVAC, framing, drywall, insulation, painting, flooring, ceramic and tile, suspended and acoustic ceilings, concrete, masonry, carpentry, millwork, cabinets, doors, windows, storefronts, roofing, shingles, waterproofing, gutters, siding, stucco, and related interior or exterior commercial work. These examples are not exhaustive. Do not promise that a specific project will be accepted; collect the details and state that the team will review the request.
-Standalone furniture repair, chair repair, and upholstery are outside the company's scope. Do not treat an appointment request for an out-of-scope service as eligible for scheduling.
+Commercial hood cleaning, commercial kitchen deep cleaning, kitchen-exhaust cleaning, and closely related commercial-facility maintenance may be submitted as a site-visit request for team review. Treat these as eligible for review, not as a promise that the company has accepted the work.
+General janitorial work, routine floor cleaning, housekeeping, maid services, residential cleaning, standalone furniture repair, chair repair, and upholstery are outside the company's scope. Do not treat an appointment request for an out-of-scope service as eligible for scheduling.
+When the customer names the property in the same message as the work, extract both facts. For example, "install an outlet in my office" establishes propertyType=office and projectScope=install an electrical outlet. Do not ask for the property type again.
+Preserve the customer's actual work description. Do not broaden "inspect the air conditioner" into "HVAC and refrigeration" and do not add refrigeration unless the customer requested it. Normalize minor grammar without changing intent.
 Dates must be YYYY-MM-DD. Resolve relative dates using today's Central Time date: ${new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date())}.
 preferredPeriod must be morning, afternoon, or any.
 selectedOption must be 1, 2, or 3 only when the customer clearly chooses one of the offered options.
@@ -893,7 +969,13 @@ function applyUpdates(state, analysis) {
   ];
   for (const field of fields) {
     const value = normalizeText(analysis?.[field], field === "projectScope" ? 2000 : 500);
-    if (value) next[field] = field === "customerName" ? formatPersonName(value) : value;
+    if (value) {
+      next[field] = field === "customerName"
+        ? formatPersonName(value)
+        : field === "projectScope"
+          ? normalizeProjectScope(value, analysis?.propertyType ?? next.propertyType)
+          : value;
+    }
   }
   const email = extractEmail(analysis?.email);
   if (email) next.email = email;
@@ -1257,6 +1339,20 @@ export default async function handler(request, response) {
       state,
     });
 
+    const inferredPropertyType = inferPropertyTypeFromMessage(
+      effectiveCurrentMessage,
+      analysis.language,
+    );
+    if (!isSpecificPropertyType(analysis.propertyType) && inferredPropertyType) {
+      analysis.propertyType = inferredPropertyType;
+    }
+    if (normalizeText(analysis.projectScope)) {
+      analysis.projectScope = normalizeProjectScope(
+        analysis.projectScope,
+        analysis.propertyType ?? state.propertyType,
+      );
+    }
+
     analysis = applyExpectedFieldAnswer(
       state,
       analysis,
@@ -1279,6 +1375,12 @@ export default async function handler(request, response) {
     }
 
     const bookingContextActive = state.active || state.stage !== "idle";
+    const reviewableCommercialSupportService =
+      isReviewableCommercialSupportService(effectiveCurrentMessage) ||
+      isReviewableCommercialSupportService(analysis.projectScope);
+    const explicitlyOutOfScopeService =
+      isClearlyOutOfScopeService(effectiveCurrentMessage) ||
+      isClearlyOutOfScopeService(analysis.projectScope);
 
     const detectedLanguage = analysis.language === "es" ? "es" : "en";
     const residentialRequest =
@@ -1333,9 +1435,9 @@ export default async function handler(request, response) {
 
     if (
       state.stage === "idle" &&
-      (analysis.serviceInScope === false ||
-        isClearlyOutOfScopeService(effectiveCurrentMessage) ||
-        isClearlyOutOfScopeService(analysis.projectScope))
+      (explicitlyOutOfScopeService ||
+        (analysis.serviceInScope === false &&
+          !reviewableCommercialSupportService))
     ) {
       return response.status(200).json({
         ok: true,
