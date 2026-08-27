@@ -243,6 +243,17 @@ async function syncContactBookingState({
   const customFields = contact?.customFields ?? contact?.metadata?.customFields ?? {};
   const currentState = safeJsonParse(customFields?.booking_state, {}) ?? {};
 
+  // A customer may have several calendar requests. Never let the approval of
+  // an older event overwrite a newer draft or a different pending request.
+  if (
+    eventId &&
+    currentState.eventId !== eventId &&
+    (currentState.active === true ||
+      ["collecting_details", "collecting_preference", "collecting_email", "awaiting_slot_selection", "awaiting_confirmation", "pending_approval"].includes(currentState.stage))
+  ) {
+    return { updated: false, reason: "newer_booking_state_preserved" };
+  }
+
   const nextState =
     action === "approve"
       ? {
@@ -296,6 +307,7 @@ function eventToPublicBooking(event) {
     status: privateData.bookingStatus ?? "pending_approval",
     customerName: privateData.customerName || event.summary?.split("—").at(-1)?.trim() || "Customer",
     whatsappNumber: privateData.whatsappNumber || "",
+    zernioConnected: Boolean(privateData.conversationId),
     language: privateData.language === "es" ? "es" : "en",
     location: event.location ?? "",
     description: event.description ?? "",
@@ -303,6 +315,28 @@ function eventToPublicBooking(event) {
     end: event.end?.dateTime ?? event.end?.date ?? null,
     eventLink: event.htmlLink ?? null,
   };
+}
+
+export function updateDecisionDescription(description, action) {
+  const statusLine = action === "approve" ? "STATUS: CONFIRMED" : "STATUS: DECLINED";
+  const decisionLine =
+    action === "approve"
+      ? "The appointment has been approved and confirmed by the NEXT SOLUTIONS PARTNERS team."
+      : "The requested appointment was reviewed and declined by the NEXT SOLUTIONS PARTNERS team.";
+
+  const lines = normalizeText(description, 10000)
+    .split("\n")
+    .filter(
+      (line) =>
+        !/^STATUS:/i.test(line.trim()) &&
+        !/^This time is being held provisionally\.?$/i.test(line.trim()) &&
+        !/^The appointment is not final until approved/i.test(line.trim()),
+    );
+
+  return [statusLine, ...lines, "", decisionLine]
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 async function listPendingApprovals(accessToken, calendarId) {
@@ -323,13 +357,6 @@ async function listPendingApprovals(accessToken, calendarId) {
   }
   const data = await calendarResponse.json();
   return (data.items ?? []).map(eventToPublicBooking);
-}
-
-function replaceStatusLine(description, statusLine) {
-  const text = normalizeText(description, 8000);
-  if (!text) return statusLine;
-  if (/^STATUS:.*$/m.test(text)) return text.replace(/^STATUS:.*$/m, statusLine);
-  return `${statusLine}\n\n${text}`;
 }
 
 function renderApprovalPage() {
@@ -362,7 +389,7 @@ function renderApprovalPage() {
   function detail(label,value){const row=document.createElement('div');row.className='row';const l=document.createElement('div');l.className='label';l.textContent=label;const v=document.createElement('div');v.className='value';v.textContent=value||'—';row.append(l,v);return row}
   function formatDate(value,language){if(!value)return '—';return new Intl.DateTimeFormat(language==='es'?'es-US':'en-US',{timeZone:'America/Chicago',weekday:'long',month:'long',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}).format(new Date(value))+' CT'}
   async function request(path,options={}){const secret=secretInput.value.trim();if(!secret)throw new Error('Enter the internal webhook secret.');const response=await fetch(path,{...options,headers:{'Content-Type':'application/json','x-internal-secret':secret,...options.headers}});const data=await response.json().catch(()=>({ok:false,error:'Invalid server response'}));if(!response.ok)throw new Error(data.error||('Request failed: '+response.status));return data}
-  function bookingCard(item){const card=document.createElement('article');card.className='card';const badge=document.createElement('span');badge.className='badge';badge.textContent='PENDING APPROVAL';const name=document.createElement('div');name.className='name';name.textContent=item.customerName||'Customer';const date=document.createElement('div');date.className='date';date.textContent=formatDate(item.start,item.language);const details=document.createElement('div');details.className='details';details.append(detail('Location',item.location),detail('WhatsApp',item.whatsappNumber||'Not stored in this event'),detail('Language',item.language==='es'?'Spanish':'English'));
+  function bookingCard(item){const card=document.createElement('article');card.className='card';const badge=document.createElement('span');badge.className='badge';badge.textContent='PENDING APPROVAL';const name=document.createElement('div');name.className='name';name.textContent=item.customerName||'Customer';const date=document.createElement('div');date.className='date';date.textContent=formatDate(item.start,item.language);const details=document.createElement('div');details.className='details';const whatsappStatus=item.whatsappNumber|| (item.zernioConnected?'Connected through Zernio':'WhatsApp connection unavailable');details.append(detail('Location',item.location),detail('WhatsApp',whatsappStatus),detail('Language',item.language==='es'?'Spanish':'English'));
     const actions=document.createElement('div');actions.className='actions';const approve=document.createElement('button');approve.className='button approve';approve.textContent='Approve';approve.onclick=()=>process(item,'approve',approve);const decline=document.createElement('button');decline.className='button decline';decline.textContent='Decline';decline.onclick=()=>process(item,'decline',decline);actions.append(approve,decline);if(item.eventLink){const open=document.createElement('a');open.className='button open';open.textContent='Open Calendar';open.href=item.eventLink;open.target='_blank';open.rel='noopener';actions.append(open)}card.append(badge,name,date,details,actions);return card}
   async function load(preserveNotice=false){if(!preserveNotice)clearNotice();loadButton.disabled=true;list.innerHTML='';count.textContent='Loading…';try{const data=await request('/api/appointment-approvals');count.textContent=data.count+' pending request'+(data.count===1?'':'s');if(!data.approvals.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='There are no pending appointment requests.';list.append(empty)}else data.approvals.forEach(item=>list.append(bookingCard(item)))}catch(error){count.textContent='';showNotice(error.message,'bad')}finally{loadButton.disabled=false}}
   async function process(item,action,button){const verb=action==='approve'?'approve':'decline';if(!confirm('Are you sure you want to '+verb+' this appointment request?'))return;clearNotice();button.disabled=true;try{const data=await request('/api/appointment-approvals',{method:'POST',body:JSON.stringify({eventId:item.eventId,action})});if(data.notification?.sent){showNotice('Appointment '+data.bookingStatus+'. The WhatsApp notification was sent.','good')}else{const reason=data.notification?.reason;const text=reason==='missing_conversation_id'?'Calendar was updated, but this older event does not contain a WhatsApp conversation ID. Notify the customer manually.':reason==='whatsapp_window_or_template_required'?'Calendar was updated, but WhatsApp could not send a free-form message outside the 24-hour window. Notify the customer manually or use an approved template.':'Calendar was updated, but the WhatsApp notification was not delivered. Review Zernio before contacting the customer.';showNotice(text,'warn')}await load(true)}catch(error){showNotice(error.message,'bad');button.disabled=false}}
@@ -395,12 +422,11 @@ async function updateApproval({ accessToken, calendarId, eventId, action }) {
 
   const customerName = privateData.customerName || event.summary?.split("—").at(-1)?.trim() || "Customer";
   const summaryPrefix = action === "approve" ? "CONFIRMED" : "DECLINED";
-  const statusLine = action === "approve" ? "STATUS: CONFIRMED" : "STATUS: DECLINED";
   const patchBody = {
     status: "confirmed",
     transparency: action === "approve" ? "opaque" : "transparent",
     summary: `${summaryPrefix} — Commercial Site Visit — ${customerName}`,
-    description: replaceStatusLine(event.description, statusLine),
+    description: updateDecisionDescription(event.description, action),
     extendedProperties: {
       ...event.extendedProperties,
       private: {
