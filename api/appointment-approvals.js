@@ -123,6 +123,17 @@ function extractAccounts(data) {
   return candidates.find(Array.isArray) ?? [];
 }
 
+function extractExternalId(value) {
+  if (typeof value === "string" || typeof value === "number") {
+    return normalizeText(String(value), 300);
+  }
+  if (!value || typeof value !== "object") return "";
+  const nested = value.id ?? value._id ?? value.profileId ?? value.accountId;
+  return typeof nested === "string" || typeof nested === "number"
+    ? normalizeText(String(nested), 300)
+    : "";
+}
+
 async function resolveWhatsAppConnection() {
   const accountResponse = await zernioFetch(
     "/accounts?platform=whatsapp&page=1&limit=100",
@@ -137,16 +148,18 @@ async function resolveWhatsAppConnection() {
     accounts.find((account) =>
       ["active", "live", "connected"].includes(String(account?.status ?? "").toLowerCase()),
     ) ?? accounts[0];
-  const accountId =
+  const accountId = extractExternalId(
     process.env.ZERNIO_WHATSAPP_ACCOUNT_ID ??
-    selected?.id ??
-    selected?._id ??
-    selected?.accountId;
+      selected?.accountId ??
+      selected?.id ??
+      selected?._id,
+  );
   if (!accountId) throw new Error("No WhatsApp account is available");
-  const profileId =
+  const profileId = extractExternalId(
     process.env.ZERNIO_PROFILE_ID ??
-    selected?.profileId ??
-    selected?.profile?.id;
+      selected?.profile?.id ??
+      selected?.profileId,
+  );
   return { accountId, profileId };
 }
 
@@ -298,7 +311,10 @@ async function createScheduledReminder({
     }),
   });
   if (!createResponse.ok) {
-    throw new Error(`Zernio reminder draft failed: ${createResponse.status}`);
+    const errorBody = await createResponse.text();
+    throw new Error(
+      `Zernio reminder draft failed: ${createResponse.status} ${errorBody.slice(0, 500)}`,
+    );
   }
   const created = await createResponse.json();
   const broadcastId = created?.broadcast?.id ?? created?.data?.broadcast?.id;
