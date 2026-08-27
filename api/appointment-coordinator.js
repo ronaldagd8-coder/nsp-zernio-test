@@ -70,9 +70,21 @@ function asksToAddressAnotherQuestion(value) {
 function isServiceCapabilityQuestion(value) {
   const text = normalizeForIntent(value);
   if (!text || text.length > 500) return false;
-  return /\b(tambien|ademas) (hacen|ofrecen|realizan|trabajan|atienden)\b|\b(ustedes )?(hacen|ofrecen|realizan)\b|\bquiero saber si (hacen|ofrecen|realizan)\b|\b(do you also|can you also|do you offer|do you provide|can you handle)\b/.test(
-    text,
-  );
+
+  const knownService =
+    /\b(framing|estructura|drywall|panel de yeso|electricidad|electrico|electrical|hvac|aire acondicionado|refrigeracion|refrigeration|plomeria|plumbing|fire system|fire protection|sistema contra incendios|gas line|linea de gas|pintura|painting|roofing|roof|techo|techado|data|datos|automation|automatizacion|cableado|cabling|network|red|wifi|wi-fi|security system|sistema de seguridad)\b/;
+
+  const asksCapability =
+    /\b(tambien|ademas) (hacen|ofrecen|realizan|trabajan|atienden)\b|\b(ustedes )?(hacen|ofrecen|realizan|trabajan con|atienden)\b|\bquiero saber si (hacen|ofrecen|realizan)\b|\b(do you also|can you also|do you offer|do you provide|can you handle|do you work with)\b/.test(
+      text,
+    );
+
+  const shortFollowUp =
+    /^(y|e|and|what about)\b/.test(text) && knownService.test(text);
+  const trailingAlsoQuestion =
+    knownService.test(text) && /\b(tambien|also)\s*\??$/.test(text);
+
+  return asksCapability || shortFollowUp || trailingAlsoQuestion;
 }
 
 function isResumeBookingIntent(value) {
@@ -81,6 +93,14 @@ function isResumeBookingIntent(value) {
   return /\b(sigamos|continuemos|seguir con|seguimos con|retomemos|retomar|continuar con) (la )?(reservacion|reserva|solicitud|cita|visita|agenda)|\b(continue|resume|go back to) (with |the )?(booking|appointment|request|site visit)\b/.test(
     text,
   );
+}
+
+function extractExplicitOnlyService(value) {
+  const text = normalizeForIntent(value).replace(/[.!?]+$/g, "").trim();
+  const match = /^(?:no[, ]+)?(?:solo|solamente|only)\s+(?:la |el |the )?(.+)$/.exec(text);
+  if (!match) return null;
+  const service = normalizeText(match[1], 300);
+  return service || null;
 }
 
 function isEmojiOnlyMessage(value) {
@@ -1095,6 +1115,11 @@ export default async function handler(request, response) {
       analysis,
       effectiveCurrentMessage,
     );
+
+    const explicitOnlyService = extractExplicitOnlyService(effectiveCurrentMessage);
+    if (explicitOnlyService) {
+      analysis.projectScope = explicitOnlyService;
+    }
 
     const bookingContextActive = state.active || state.stage !== "idle";
 
