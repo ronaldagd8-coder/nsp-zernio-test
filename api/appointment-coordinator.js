@@ -143,10 +143,81 @@ function isResumeBookingIntent(value) {
 
 function extractExplicitOnlyService(value) {
   const text = normalizeForIntent(value).replace(/[.!?]+$/g, "").trim();
-  const match = /^(?:no[, ]+)?(?:solo|solamente|only)\s+(?:la |el |the )?(.+)$/.exec(text);
+  const match = /^(?:no[, ]+)?(?:mejor\s+)?(?:solo|solamente|only)\s+(?:la |el |the )?(.+)$/.exec(text);
   if (!match) return null;
   const service = normalizeText(match[1], 300);
   return service || null;
+}
+
+function serviceScopeLabel(service, language) {
+  const labels = {
+    framing: ["framing", "framing"],
+    drywall: ["drywall", "drywall"],
+    electrical: ["electricidad", "electrical work"],
+    hvac: ["HVAC y refrigeración", "HVAC and refrigeration"],
+    plumbing: ["plomería", "plumbing"],
+    fireSystems: ["sistemas contra incendios", "fire systems"],
+    gasLine: ["líneas de gas", "gas-line work"],
+    painting: ["pintura", "painting"],
+    roofing: ["roofing", "roofing"],
+    dataAutomation: ["data y automatización", "data and automation"],
+  };
+  const pair = labels[service];
+  return pair ? pair[language === "es" ? 0 : 1] : null;
+}
+
+function extractExplicitIncludedService(value, language) {
+  const text = normalizeForIntent(value).replace(/[.!?]+$/g, "").trim();
+  const match = /^(?:(?:quiero|deseo|necesito)\s+)?(?:incluir|agregar|anadir|incluye|agrega|include|add)\s+(?:la |el |the )?(.+?)(?:\s+(?:en|para)\s+(?:la\s+)?(?:visita|solicitud|cita|reserva)|\s+(?:to|in|for)\s+(?:the\s+)?(?:visit|request|appointment|booking))?$/.exec(text);
+  if (match) {
+    const service = normalizeText(match[1], 300);
+    if (service) return service;
+  }
+
+  const hasInclusionIntent =
+    /\b(agrega|agregues|agregar|agreguemos|incluye|incluyas|incluir|anade|anadas|anadamos|add|include)\b/.test(
+      text,
+    );
+  if (!hasInclusionIntent) return null;
+
+  const confirmedService = detectConfirmedCommercialService(text);
+  return confirmedService
+    ? serviceScopeLabel(confirmedService, language === "es" ? "es" : "en")
+    : null;
+}
+
+function mergeProjectScopes(currentScope, includedService, language = "es") {
+  const current = normalizeText(currentScope, 2000);
+  const included = normalizeText(includedService, 300);
+  if (!current) return included;
+  if (!included) return current;
+  if (normalizeForIntent(current).includes(normalizeForIntent(included))) return current;
+  return `${current}${language === "es" ? " y " : " and "}${included}`;
+}
+
+function capitalizeFirst(value) {
+  const text = normalizeText(value, 120);
+  return text ? `${text.charAt(0).toUpperCase()}${text.slice(1)}` : "";
+}
+
+function scopeChangeAcknowledgement({ onlyService, includedService, state, language }) {
+  const firstName = capitalizeFirst(getFirstName(state));
+  const addressedName = firstName ? `, ${firstName}` : "";
+  if (onlyService) {
+    return language === "es"
+      ? `Entendido${addressedName}. Dejaremos únicamente ${onlyService} para la visita.`
+      : `Understood${addressedName}. We will keep the visit scope limited to ${onlyService}.`;
+  }
+  if (includedService) {
+    return language === "es"
+      ? `Perfecto${addressedName}. Entonces la visita incluirá ${state.projectScope}.`
+      : `Perfect${addressedName}. The visit will include ${state.projectScope}.`;
+  }
+  return "";
+}
+
+function prependAcknowledgement(acknowledgement, reply) {
+  return acknowledgement ? `${acknowledgement} ${reply}` : reply;
 }
 
 function isEmojiOnlyMessage(value) {
@@ -1163,8 +1234,18 @@ export default async function handler(request, response) {
     );
 
     const explicitOnlyService = extractExplicitOnlyService(effectiveCurrentMessage);
+    const explicitIncludedService = extractExplicitIncludedService(
+      effectiveCurrentMessage,
+      analysis.language,
+    );
     if (explicitOnlyService) {
       analysis.projectScope = explicitOnlyService;
+    } else if (explicitIncludedService) {
+      analysis.projectScope = mergeProjectScopes(
+        state.projectScope,
+        explicitIncludedService,
+        analysis.language,
+      );
     }
 
     const bookingContextActive = state.active || state.stage !== "idle";
@@ -1244,7 +1325,9 @@ export default async function handler(request, response) {
       bookingContextActive &&
       confirmedService &&
       isServiceCapabilityQuestion(effectiveCurrentMessage) &&
-      !isServiceExplanationQuestion(effectiveCurrentMessage)
+      !isServiceExplanationQuestion(effectiveCurrentMessage) &&
+      !explicitOnlyService &&
+      !explicitIncludedService
     ) {
       return response.status(200).json({
         ok: true,
@@ -1258,6 +1341,8 @@ export default async function handler(request, response) {
 
     if (
       bookingContextActive &&
+      !explicitOnlyService &&
+      !explicitIncludedService &&
       (analysis.separateProjectQuestion === true ||
         isServiceCapabilityQuestion(effectiveCurrentMessage) ||
         isServiceExplanationQuestion(effectiveCurrentMessage))
@@ -1437,6 +1522,8 @@ export default async function handler(request, response) {
 
     if (
       state.stage === "awaiting_confirmation" &&
+      !explicitOnlyService &&
+      !explicitIncludedService &&
       (analysis.separateProjectQuestion === true ||
         asksToAddressAnotherQuestion(effectiveCurrentMessage))
     ) {
@@ -1512,10 +1599,17 @@ export default async function handler(request, response) {
     const previousPreferredDate = state.preferredDate;
     const previousPreferredPeriod = state.preferredPeriod;
     state = applyUpdates({ ...state, active: true, language }, analysis);
+    const scopeAcknowledgement = scopeChangeAcknowledgement({
+      onlyService: explicitOnlyService,
+      includedService: explicitIncludedService,
+      state,
+      language,
+    });
 
     if (
       state.stage === "awaiting_confirmation" &&
-      isDirectRejection(effectiveCurrentMessage)
+      isDirectRejection(effectiveCurrentMessage) &&
+      !explicitOnlyService
     ) {
       state.preferredDate = null;
       state.preferredPeriod = null;
@@ -1626,7 +1720,10 @@ export default async function handler(request, response) {
           ok: true,
           handled: true,
           language,
-          reply: askForField(missing[0], language, state),
+          reply: prependAcknowledgement(
+            scopeAcknowledgement,
+            askForField(missing[0], language, state),
+          ),
           stage: state.stage,
           missingFields: missing,
         });
@@ -1639,10 +1736,12 @@ export default async function handler(request, response) {
           ok: true,
           handled: true,
           language,
-          reply:
+          reply: prependAcknowledgement(
+            scopeAcknowledgement,
             language === "es"
               ? "¿A qué correo electrónico te gustaría recibir la confirmación de la visita? Si prefieres continuar únicamente por WhatsApp, también está bien."
               : "What email address would you like us to use for the visit confirmation? If you prefer to continue through WhatsApp only, that is also fine.",
+          ),
           stage: state.stage,
         });
       }
@@ -1653,7 +1752,10 @@ export default async function handler(request, response) {
         ok: true,
         handled: true,
         language,
-        reply: confirmationReply(state, language),
+        reply: prependAcknowledgement(
+          scopeAcknowledgement,
+          confirmationReply(state, language),
+        ),
         stage: state.stage,
       });
     }
@@ -1666,7 +1768,10 @@ export default async function handler(request, response) {
         ok: true,
         handled: true,
         language,
-        reply: askForField(missingDetails[0], language, state),
+        reply: prependAcknowledgement(
+          scopeAcknowledgement,
+          askForField(missingDetails[0], language, state),
+        ),
         stage: state.stage,
         missingFields: missingDetails,
       });
@@ -1679,10 +1784,12 @@ export default async function handler(request, response) {
         ok: true,
         handled: true,
         language,
-        reply:
+        reply: prependAcknowledgement(
+          scopeAcknowledgement,
           language === "es"
             ? `${getFirstName(state) ? `${getFirstName(state)}, ` : ""}¿qué fecha prefieres para la visita comercial?`
             : `${getFirstName(state) ? `${getFirstName(state)}, ` : ""}what date would you prefer for the commercial site visit?`,
+        ),
         stage: state.stage,
       });
     }
@@ -1714,10 +1821,12 @@ export default async function handler(request, response) {
         ok: true,
         handled: true,
         language,
-        reply:
+        reply: prependAcknowledgement(
+          scopeAcknowledgement,
           language === "es"
             ? `${getFirstName(state) ? `${getFirstName(state)}, ` : ""}¿prefieres la visita en la mañana o en la tarde?`
             : `${getFirstName(state) ? `${getFirstName(state)}, ` : ""}would you prefer the visit in the morning or afternoon?`,
+        ),
         stage: state.stage,
       });
     }
@@ -1764,7 +1873,10 @@ export default async function handler(request, response) {
       ok: true,
       handled: true,
       language,
-      reply: availabilityReply(state.offeredSlots, language),
+      reply: prependAcknowledgement(
+        scopeAcknowledgement,
+        availabilityReply(state.offeredSlots, language),
+      ),
       stage: state.stage,
       options: state.offeredSlots,
     });
