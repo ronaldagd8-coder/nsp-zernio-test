@@ -67,12 +67,39 @@ function asksToAddressAnotherQuestion(value) {
   );
 }
 
+function detectConfirmedCommercialService(value) {
+  const text = normalizeForIntent(value);
+  if (!text) return null;
+
+  const services = [
+    ["dataAutomation", /\b(data|datos|automation|automatizacion|cableado|cabling|network|red|wifi|wi-fi|security systems?|sistemas? de seguridad)\b/],
+    ["fireSystems", /\b(fire systems?|fire protection|sistemas? contra incendios)\b/],
+    ["gasLine", /\b(gas lines?|lineas? de gas)\b/],
+    ["roofing", /\b(roofing|roof|techo|techado)\b/],
+    ["hvac", /\b(hvac|aire acondicionado|refrigeracion|refrigeration)\b/],
+    ["electrical", /\b(electricidad|electrico|electrical)\b/],
+    ["plumbing", /\b(plomeria|plumbing)\b/],
+    ["painting", /\b(pintura|painting)\b/],
+    ["drywall", /\b(drywall|panel de yeso)\b/],
+    ["framing", /\b(framing|estructura)\b/],
+  ];
+
+  return services.find(([, pattern]) => pattern.test(text))?.[0] ?? null;
+}
+
+function isServiceExplanationQuestion(value) {
+  const text = normalizeForIntent(value);
+  return /\b(que tipo|cual tipo|que incluye|en que consiste|explica|mas informacion|what kind|what type|what does it include|explain|more information)\b/.test(
+    text,
+  );
+}
+
 function isServiceCapabilityQuestion(value) {
+  const raw = normalizeText(value, 500);
   const text = normalizeForIntent(value);
   if (!text || text.length > 500) return false;
 
-  const knownService =
-    /\b(framing|estructura|drywall|panel de yeso|electricidad|electrico|electrical|hvac|aire acondicionado|refrigeracion|refrigeration|plomeria|plumbing|fire system|fire protection|sistema contra incendios|gas line|linea de gas|pintura|painting|roofing|roof|techo|techado|data|datos|automation|automatizacion|cableado|cabling|network|red|wifi|wi-fi|security system|sistema de seguridad)\b/;
+  const knownService = Boolean(detectConfirmedCommercialService(text));
 
   const asksCapability =
     /\b(tambien|ademas) (hacen|ofrecen|realizan|trabajan|atienden)\b|\b(ustedes )?(hacen|ofrecen|realizan|trabajan con|atienden)\b|\bquiero saber si (hacen|ofrecen|realizan)\b|\b(do you also|can you also|do you offer|do you provide|can you handle|do you work with)\b/.test(
@@ -80,11 +107,30 @@ function isServiceCapabilityQuestion(value) {
     );
 
   const shortFollowUp =
-    /^(y|e|and|what about)\b/.test(text) && knownService.test(text);
+    /^(y|e|and|what about)\b/.test(text) && knownService;
   const trailingAlsoQuestion =
-    knownService.test(text) && /\b(tambien|also)\s*\??$/.test(text);
+    knownService && /\b(tambien|also)\s*\??$/.test(text);
+  const bareServiceQuestion =
+    knownService && /\?\s*$/.test(raw) && text.split(/\s+/).length <= 8;
 
-  return asksCapability || shortFollowUp || trailingAlsoQuestion;
+  return asksCapability || shortFollowUp || trailingAlsoQuestion || bareServiceQuestion;
+}
+
+function confirmedServiceReply(service, language) {
+  const replies = {
+    framing: ["Sí, realizamos trabajos de framing comercial.", "Yes, we provide commercial framing services."],
+    drywall: ["Sí, realizamos trabajos de drywall comercial.", "Yes, we provide commercial drywall services."],
+    electrical: ["Sí, realizamos trabajos de electricidad comercial.", "Yes, we provide commercial electrical services."],
+    hvac: ["Sí, realizamos trabajos comerciales de HVAC y refrigeración.", "Yes, we provide commercial HVAC and refrigeration services."],
+    plumbing: ["Sí, realizamos trabajos de plomería comercial.", "Yes, we provide commercial plumbing services."],
+    fireSystems: ["Sí, realizamos trabajos de sistemas contra incendios para propiedades comerciales.", "Yes, we provide fire-system services for commercial properties."],
+    gasLine: ["Sí, realizamos trabajos comerciales de líneas de gas.", "Yes, we provide commercial gas-line services."],
+    painting: ["Sí, realizamos trabajos de pintura comercial.", "Yes, we provide commercial painting services."],
+    roofing: ["Sí, realizamos trabajos de roofing comercial.", "Yes, we provide commercial roofing services."],
+    dataAutomation: ["Sí, ofrecemos servicios comerciales de data y automatización.", "Yes, we provide commercial data and automation services."],
+  };
+  const pair = replies[service];
+  return pair ? pair[language === "es" ? 0 : 1] : null;
 }
 
 function isResumeBookingIntent(value) {
@@ -1190,10 +1236,31 @@ export default async function handler(request, response) {
       });
     }
 
+    const confirmedService = detectConfirmedCommercialService(
+      effectiveCurrentMessage,
+    );
+
+    if (
+      bookingContextActive &&
+      confirmedService &&
+      isServiceCapabilityQuestion(effectiveCurrentMessage) &&
+      !isServiceExplanationQuestion(effectiveCurrentMessage)
+    ) {
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        bookingDraftPreserved: true,
+        language: detectedLanguage,
+        reply: confirmedServiceReply(confirmedService, detectedLanguage),
+        stage: state.stage,
+      });
+    }
+
     if (
       bookingContextActive &&
       (analysis.separateProjectQuestion === true ||
-        isServiceCapabilityQuestion(effectiveCurrentMessage))
+        isServiceCapabilityQuestion(effectiveCurrentMessage) ||
+        isServiceExplanationQuestion(effectiveCurrentMessage))
     ) {
       return response.status(200).json({
         ok: true,
