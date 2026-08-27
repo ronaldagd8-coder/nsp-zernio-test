@@ -67,6 +67,22 @@ function asksToAddressAnotherQuestion(value) {
   );
 }
 
+function isServiceCapabilityQuestion(value) {
+  const text = normalizeForIntent(value);
+  if (!text || text.length > 500) return false;
+  return /\b(tambien|ademas) (hacen|ofrecen|realizan|trabajan|atienden)\b|\b(ustedes )?(hacen|ofrecen|realizan)\b|\bquiero saber si (hacen|ofrecen|realizan)\b|\b(do you also|can you also|do you offer|do you provide|can you handle)\b/.test(
+    text,
+  );
+}
+
+function isResumeBookingIntent(value) {
+  const text = normalizeForIntent(value);
+  if (!text || text.length > 300) return false;
+  return /\b(sigamos|continuemos|seguir con|seguimos con|retomemos|retomar|continuar con) (la )?(reservacion|reserva|solicitud|cita|visita|agenda)|\b(continue|resume|go back to) (with |the )?(booking|appointment|request|site visit)\b/.test(
+    text,
+  );
+}
+
 function isEmojiOnlyMessage(value) {
   const text = normalizeText(value, 500);
   if (!text) return false;
@@ -828,6 +844,29 @@ function askForField(field, language, state = {}) {
   return (language === "es" ? es : en)[field];
 }
 
+function resumeBookingReply(state, language) {
+  const missing = missingRequiredFields(state);
+  if (missing.length) return askForField(missing[0], language, state);
+
+  if (state.stage === "collecting_email") {
+    return language === "es"
+      ? "¿A qué correo electrónico te gustaría recibir la confirmación de la visita? Si prefieres continuar únicamente por WhatsApp, también está bien."
+      : "What email address would you like us to use for the visit confirmation? If you prefer to continue through WhatsApp only, that is also fine.";
+  }
+
+  if (state.stage === "awaiting_confirmation") {
+    return confirmationReply(state, language);
+  }
+
+  if (state.stage === "awaiting_slot_selection" && state.offeredSlots.length) {
+    return availabilityReply(state.offeredSlots, language);
+  }
+
+  return language === "es"
+    ? "Claro, continuemos. ¿Qué fecha prefieres para la visita comercial?"
+    : "Of course, let's continue. What date would you prefer for the commercial site visit?";
+}
+
 function parseIsoDate(value) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(normalizeText(value, 20));
   if (!match) return null;
@@ -1126,11 +1165,28 @@ export default async function handler(request, response) {
       });
     }
 
-    if (bookingContextActive && analysis.separateProjectQuestion === true) {
+    if (
+      bookingContextActive &&
+      (analysis.separateProjectQuestion === true ||
+        isServiceCapabilityQuestion(effectiveCurrentMessage))
+    ) {
       return response.status(200).json({
         ok: true,
         handled: false,
         bookingDraftPreserved: true,
+        stage: state.stage,
+      });
+    }
+
+    if (bookingContextActive && isResumeBookingIntent(effectiveCurrentMessage)) {
+      const resumeLanguage =
+        analysis.language === "es" ? "es" : state.language === "es" ? "es" : "en";
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        bookingDraftPreserved: true,
+        language: resumeLanguage,
+        reply: resumeBookingReply(state, resumeLanguage),
         stage: state.stage,
       });
     }
