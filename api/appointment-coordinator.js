@@ -95,6 +95,12 @@ function isClearlyOutOfScopeService(value) {
   );
 }
 
+export function getOutOfScopeReply(language) {
+  return language === "es"
+    ? "Gracias por consultarnos. Esa solicitud no corresponde a los servicios de construcción, remodelación o reparación de instalaciones comerciales que ofrece NEXT SOLUTIONS PARTNERS, por lo que no puedo programar una visita para ese servicio."
+    : "Thank you for checking with us. That request is outside the commercial construction, remodeling, and building-repair services offered by NEXT SOLUTIONS PARTNERS, so I cannot schedule a visit for that service.";
+}
+
 function getFirstName(state) {
   return normalizeText(state?.customerName, 120).split(/\s+/)[0] || "";
 }
@@ -956,10 +962,7 @@ export default async function handler(request, response) {
         handled: true,
         outOfScope: true,
         language: analysis.language === "es" ? "es" : "en",
-        reply:
-          analysis.language === "es"
-            ? "Gracias por consultarnos. NEXT SOLUTIONS PARTNERS se especializa en construcción, remodelación y reparaciones de instalaciones comerciales, pero no ofrecemos reparación ni tapicería de muebles o sillas. Por eso no puedo programar una visita para ese servicio."
-            : "Thank you for checking with us. NEXT SOLUTIONS PARTNERS specializes in commercial construction, remodeling, and building-related repairs, but we do not provide furniture or chair repair and upholstery. For that reason, I cannot schedule a visit for this service.",
+        reply: getOutOfScopeReply(analysis.language),
         stage: "idle",
       });
     }
