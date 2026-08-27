@@ -81,6 +81,37 @@ function projectScopeSupportedByCurrentMessage(scope, currentMessage) {
   return scopeStems.some((stem) => messageStems.has(stem));
 }
 
+function isSiteAccessQuestion(value) {
+  const text = normalizeForIntent(value);
+  if (!text || text.length > 1000) return false;
+  return /\b(si no hay nadie|si no hubiese nadie|si no esta nadie|tiene que haber (a )?alguien|tendria que haber (a )?alguien|debe haber (a )?alguien|alguien (debe|tiene que|tendria que) estar|alguien presente|pueden entrar|podrian entrar|entrarian ustedes|ustedes entrarian|dar acceso|facilitar el acceso|without anyone there|if nobody is there|if no one is there|does someone need to be there|must someone be present|need someone present|can you enter|could you enter|access the property)\b/.test(
+    text,
+  );
+}
+
+function isSiteVisitEvaluationClarification(value) {
+  const text = normalizeForIntent(value);
+  if (!text || text.length > 1000) return false;
+  return /\b(no es para (la )?instalacion|no van a instalar|not for (the )?installation)\b/.test(text) &&
+    /\b(ver|vean|vea|revisar|revisen|evaluar|evaluen|inspeccionar|inspeccionen|visita|evaluacion|inspeccion|see|review|evaluate|inspect|walkthrough|site visit)\b/.test(
+      text,
+    );
+}
+
+function recentHistoryHasSiteAccessContext(history) {
+  const recent = Array.isArray(history) ? history.slice(-6).join("\n") : "";
+  return isSiteAccessQuestion(recent) ||
+    /\b(alguien presente|facilitar el acceso|someone present|provide access)\b/.test(
+      normalizeForIntent(recent),
+    );
+}
+
+function siteAccessReply(language) {
+  return language === "es"
+    ? "Para una visita de evaluación debe estar presente una persona autorizada para proporcionar acceso, salvo que el equipo haya aprobado previamente por escrito otra modalidad. NEXT SOLUTIONS PARTNERS no entrará por su cuenta sin autorización expresa."
+    : "For an evaluation visit, an authorized person must be present to provide access unless the team has approved another arrangement in writing beforehand. NEXT SOLUTIONS PARTNERS will not enter the property without express authorization.";
+}
+
 function isDirectConfirmation(value) {
   const text = normalizeForIntent(value);
   if (!text || text.length > 120) return false;
@@ -457,8 +488,10 @@ export function getOutOfScopeReply(language) {
 function formatPersonName(value) {
   const name = normalizeText(value, 500);
   if (!name) return "";
-  const isUniformCase = name === name.toLowerCase() || name === name.toUpperCase();
-  if (!isUniformCase) return name;
+  const hasIntentionalInternalCapital = name
+    .split(/[\s'-]+/)
+    .some((part) => /\p{Ll}\p{Lu}/u.test(part));
+  if (hasIntentionalInternalCapital) return name;
   return name.toLowerCase().replace(/(^|[\s'-])\p{L}/gu, (letter) => letter.toUpperCase());
 }
 
@@ -503,10 +536,20 @@ function defaultState() {
 
 function normalizeState(value) {
   const parsed = safeJsonParse(value, {});
+  const storedPropertyType = normalizeText(parsed?.propertyType, 500);
+  const storedProjectAddress = normalizeText(parsed?.projectAddress, 500);
   return {
     ...defaultState(),
     ...(parsed && typeof parsed === "object" ? parsed : {}),
     customerName: formatPersonName(parsed?.customerName) || null,
+    propertyType:
+      storedPropertyType && isPlausiblePropertyTypeAnswer(storedPropertyType)
+        ? storedPropertyType
+        : null,
+    projectAddress:
+      storedProjectAddress && serviceAreaSignal(storedProjectAddress) !== "outside_dfw"
+        ? storedProjectAddress
+        : null,
     offeredSlots: Array.isArray(parsed?.offeredSlots) ? parsed.offeredSlots.slice(0, 3) : [],
     knownProperties: Array.isArray(parsed?.knownProperties) ? parsed.knownProperties.slice(0, 3) : [],
   };
@@ -1562,6 +1605,22 @@ export default async function handler(request, response) {
       isResidentialPropertyMessage(effectiveCurrentMessage) ||
       (analysis.customerCorrectingAssistant === true &&
         isResidentialPropertyMessage(JSON.stringify(history.slice(-6))));
+
+    const siteAccessQuestion =
+      isSiteAccessQuestion(effectiveCurrentMessage) ||
+      (isSiteVisitEvaluationClarification(effectiveCurrentMessage) &&
+        recentHistoryHasSiteAccessContext(history));
+
+    if (siteAccessQuestion && !residentialRequest) {
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        bookingDraftPreserved: bookingContextActive,
+        language: detectedLanguage,
+        reply: siteAccessReply(detectedLanguage),
+        stage: state.stage,
+      });
+    }
 
     if (residentialRequest) {
       const correctionPrefix = analysis.customerCorrectingAssistant
