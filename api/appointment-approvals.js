@@ -123,7 +123,7 @@ function extractAccounts(data) {
   return candidates.find(Array.isArray) ?? [];
 }
 
-async function resolveWhatsAppAccountId() {
+async function resolveWhatsAppConnection() {
   const accountResponse = await zernioFetch(
     "/accounts?platform=whatsapp&page=1&limit=100",
   );
@@ -137,9 +137,17 @@ async function resolveWhatsAppAccountId() {
     accounts.find((account) =>
       ["active", "live", "connected"].includes(String(account?.status ?? "").toLowerCase()),
     ) ?? accounts[0];
-  const accountId = selected?.id ?? selected?._id ?? selected?.accountId;
+  const accountId =
+    process.env.ZERNIO_WHATSAPP_ACCOUNT_ID ??
+    selected?.id ??
+    selected?._id ??
+    selected?.accountId;
   if (!accountId) throw new Error("No WhatsApp account is available");
-  return accountId;
+  const profileId =
+    process.env.ZERNIO_PROFILE_ID ??
+    selected?.profileId ??
+    selected?.profile?.id;
+  return { accountId, profileId };
 }
 
 function formatDateTime(value, language) {
@@ -183,7 +191,7 @@ async function sendWhatsAppNotification({ conversationId, message, eventId, acti
     return { sent: false, reason: "zernio_not_configured" };
   }
 
-  const accountId = await resolveWhatsAppAccountId();
+  const { accountId } = await resolveWhatsAppConnection();
   const idempotencyKey = createHash("sha256")
     .update(`${eventId}|${action}|${message}`)
     .digest("hex");
@@ -209,6 +217,198 @@ async function sendWhatsAppNotification({ conversationId, message, eventId, acti
     };
   }
   return { sent: true };
+}
+
+function reminderTemplate({ language, hours }) {
+  if (hours === 24) {
+    return language === "es"
+      ? "commercial_visit_reminder_24h"
+      : "commercial_visit_reminder_24h_en";
+  }
+  return language === "es"
+    ? "commercial_visit_reminder_2h"
+    : "commercial_visit_reminder_2h_en";
+}
+
+function reminderVariables({ event, language, hours }) {
+  const start = new Date(event.start?.dateTime ?? event.start?.date);
+  const locale = language === "es" ? "es-US" : "en-US";
+  const date = new Intl.DateTimeFormat(locale, {
+    timeZone: TIME_ZONE,
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(start);
+  const time = new Intl.DateTimeFormat(locale, {
+    timeZone: TIME_ZONE,
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(start);
+  const privateData = event.extendedProperties?.private ?? {};
+  const customerName = privateData.customerName || "Customer";
+  const address = event.location || "the project address";
+  return hours === 24
+    ? [customerName, date, time, address]
+    : [customerName, time, address];
+}
+
+async function createScheduledReminder({
+  event,
+  contactIdentifier,
+  language,
+  hours,
+  connection,
+}) {
+  const start = new Date(event.start?.dateTime ?? event.start?.date);
+  const scheduledAt = new Date(start.getTime() - hours * 60 * 60 * 1000);
+  if (Number.isNaN(scheduledAt.getTime())) {
+    return { scheduled: false, reason: "invalid_appointment_time", hours };
+  }
+  if (scheduledAt.getTime() <= Date.now() + 5 * 60 * 1000) {
+    return { scheduled: false, reason: "reminder_time_passed", hours };
+  }
+
+  const values = reminderVariables({ event, language, hours });
+  const variableMapping = Object.fromEntries(
+    values.map((value, index) => [
+      String(index + 1),
+      { field: "custom", customValue: value },
+    ]),
+  );
+  const parameters = values.map((_, index) => ({
+    type: "text",
+    text: `{{${index + 1}}}`,
+  }));
+  const templateName = reminderTemplate({ language, hours });
+  const createResponse = await zernioFetch("/broadcasts", {
+    method: "POST",
+    body: JSON.stringify({
+      profileId: connection.profileId,
+      accountId: connection.accountId,
+      platform: "whatsapp",
+      name: `NSP ${hours}h reminder — ${event.id}`,
+      template: {
+        name: templateName,
+        language,
+        components: [{ type: "body", parameters }],
+        variableMapping,
+      },
+    }),
+  });
+  if (!createResponse.ok) {
+    throw new Error(`Zernio reminder draft failed: ${createResponse.status}`);
+  }
+  const created = await createResponse.json();
+  const broadcastId = created?.broadcast?.id ?? created?.data?.broadcast?.id;
+  if (!broadcastId) throw new Error("Zernio did not return a broadcast ID");
+
+  const recipientResponse = await zernioFetch(
+    `/broadcasts/${encodeURIComponent(broadcastId)}/recipients`,
+    {
+      method: "POST",
+      body: JSON.stringify({ contactIds: [contactIdentifier] }),
+    },
+  );
+  if (!recipientResponse.ok) {
+    await zernioFetch(`/broadcasts/${encodeURIComponent(broadcastId)}`, {
+      method: "DELETE",
+    });
+    throw new Error(`Zernio reminder recipient failed: ${recipientResponse.status}`);
+  }
+
+  const scheduleResponse = await zernioFetch(
+    `/broadcasts/${encodeURIComponent(broadcastId)}/schedule`,
+    {
+      method: "POST",
+      body: JSON.stringify({ scheduledAt: scheduledAt.toISOString() }),
+    },
+  );
+  if (!scheduleResponse.ok) {
+    await zernioFetch(`/broadcasts/${encodeURIComponent(broadcastId)}`, {
+      method: "DELETE",
+    });
+    throw new Error(`Zernio reminder schedule failed: ${scheduleResponse.status}`);
+  }
+  return {
+    scheduled: true,
+    hours,
+    broadcastId,
+    scheduledAt: scheduledAt.toISOString(),
+    templateName,
+  };
+}
+
+async function saveReminderReferences({ accessToken, calendarId, event, reminders }) {
+  const scheduled = reminders.filter((item) => item.scheduled);
+  if (!scheduled.length) return event;
+  const privateData = event.extendedProperties?.private ?? {};
+  const reminderData = Object.fromEntries(
+    scheduled.flatMap((item) => [
+      [`reminder${item.hours}hBroadcastId`, item.broadcastId],
+      [`reminder${item.hours}hScheduledAt`, item.scheduledAt],
+    ]),
+  );
+  const patchResponse = await googleCalendarFetch(
+    `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(event.id)}?sendUpdates=none`,
+    accessToken,
+    {
+      method: "PATCH",
+      body: JSON.stringify({
+        extendedProperties: {
+          ...event.extendedProperties,
+          private: { ...privateData, ...reminderData },
+        },
+      }),
+    },
+  );
+  if (!patchResponse.ok) {
+    throw new Error(`Calendar reminder references failed: ${patchResponse.status}`);
+  }
+  return patchResponse.json();
+}
+
+async function scheduleAppointmentReminders({ accessToken, calendarId, event }) {
+  const privateData = event.extendedProperties?.private ?? {};
+  const contactIdentifier = normalizeText(privateData.contactIdentifier, 300);
+  if (!contactIdentifier) {
+    return [{ scheduled: false, reason: "missing_contact", hours: 24 }, { scheduled: false, reason: "missing_contact", hours: 2 }];
+  }
+  if (!process.env.ZERNIO_API_KEY) {
+    return [{ scheduled: false, reason: "zernio_not_configured", hours: 24 }, { scheduled: false, reason: "zernio_not_configured", hours: 2 }];
+  }
+  const language = privateData.language === "es" ? "es" : "en";
+  const connection = await resolveWhatsAppConnection();
+  if (!connection.profileId) {
+    return [{ scheduled: false, reason: "missing_zernio_profile_id", hours: 24 }, { scheduled: false, reason: "missing_zernio_profile_id", hours: 2 }];
+  }
+  const reminders = [];
+  for (const hours of [24, 2]) {
+    try {
+      reminders.push(await createScheduledReminder({
+        event,
+        contactIdentifier,
+        language,
+        hours,
+        connection,
+      }));
+    } catch (error) {
+      console.error("Reminder scheduling failed", {
+        eventId: event.id,
+        hours,
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+      reminders.push({
+        scheduled: false,
+        reason: "scheduling_failed",
+        hours,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+  await saveReminderReferences({ accessToken, calendarId, event, reminders });
+  return reminders;
 }
 
 function safeJsonParse(value, fallback = null) {
@@ -534,6 +734,7 @@ export default async function handler(request, response) {
     const customerName = privateData.customerName || event.summary?.split("—").at(-1)?.trim() || "Customer";
     let notification = { sent: false, reason: "already_processed" };
     let contactState = { updated: false, reason: "already_processed" };
+    let reminders = [];
 
     if (!result.alreadyProcessed) {
       contactState = await syncContactBookingState({
@@ -553,6 +754,13 @@ export default async function handler(request, response) {
         eventId,
         action,
       });
+      if (action === "approve") {
+        reminders = await scheduleAppointmentReminders({
+          accessToken,
+          calendarId,
+          event,
+        });
+      }
     }
 
     return response.status(200).json({
@@ -562,6 +770,7 @@ export default async function handler(request, response) {
       alreadyProcessed: result.alreadyProcessed,
       contactState,
       notification,
+      reminders,
       event: eventToPublicBooking(event),
     });
   } catch (error) {
