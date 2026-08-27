@@ -131,6 +131,20 @@ function isClearlyOutOfScopeService(value) {
   );
 }
 
+function isWebsiteDevelopmentRequest(value) {
+  const text = normalizeForIntent(value);
+  if (!text) return false;
+  return /\b(pagina web|sitio web|web page|website|web site|crear una web|hacer una web|desarrollo web|web development)\b/.test(
+    text,
+  );
+}
+
+function getWebsiteDevelopmentReply(language) {
+  return language === "es"
+    ? "Gracias por consultarnos. NEXT SOLUTIONS PARTNERS se especializa en construcción, remodelación y reparaciones de propiedades comerciales, por lo que no ofrecemos desarrollo de páginas web."
+    : "Thank you for contacting us. NEXT SOLUTIONS PARTNERS specializes in commercial construction, remodeling, and facility repairs, so we do not provide website development.";
+}
+
 export function getOutOfScopeReply(language) {
   return language === "es"
     ? "Gracias por consultarnos. Esa solicitud no corresponde a los servicios de construcción, remodelación o reparación de instalaciones comerciales que ofrece NEXT SOLUTIONS PARTNERS, por lo que no puedo programar una visita para ese servicio."
@@ -1052,23 +1066,47 @@ export default async function handler(request, response) {
       (analysis.customerCorrectingAssistant === true &&
         isResidentialPropertyMessage(JSON.stringify(history.slice(-6))));
 
-    if (residentialRequest && state.stage === "idle") {
+    if (residentialRequest) {
       const correctionPrefix = analysis.customerCorrectingAssistant
         ? detectedLanguage === "es"
           ? "Tienes razón; entendí incorrectamente tu solicitud. Disculpa la confusión. "
           : "You're right; I misunderstood your request. I apologize for the confusion. "
+        : "";
+      const draftContinuation = bookingContextActive
+        ? detectedLanguage === "es"
+          ? " Tu solicitud comercial anterior sigue guardada. Cuando quieras, continuamos desde donde quedamos."
+          : " Your previous commercial request is still saved. Whenever you're ready, we can continue where we left off."
         : "";
       return response.status(200).json({
         ok: true,
         handled: true,
         outOfScope: true,
         outOfScopeReason: "residential",
+        bookingDraftPreserved: bookingContextActive,
         language: detectedLanguage,
         reply:
           detectedLanguage === "es"
-            ? `${correctionPrefix}Actualmente NEXT SOLUTIONS PARTNERS atiende proyectos y servicios de HVAC en propiedades comerciales, por lo que no podemos programar este servicio residencial.`
-            : `${correctionPrefix}NEXT SOLUTIONS PARTNERS currently provides projects and HVAC services for commercial properties, so we cannot schedule this residential service.`,
-        stage: "idle",
+            ? `${correctionPrefix}Actualmente NEXT SOLUTIONS PARTNERS atiende proyectos y servicios de HVAC en propiedades comerciales, por lo que no podemos programar este servicio residencial.${draftContinuation}`
+            : `${correctionPrefix}NEXT SOLUTIONS PARTNERS currently provides projects and HVAC services for commercial properties, so we cannot schedule this residential service.${draftContinuation}`,
+        stage: state.stage,
+      });
+    }
+
+    if (isWebsiteDevelopmentRequest(effectiveCurrentMessage)) {
+      const draftContinuation = bookingContextActive
+        ? detectedLanguage === "es"
+          ? " Tu solicitud comercial anterior sigue guardada. Cuando quieras, continuamos desde donde quedamos."
+          : " Your previous commercial request is still saved. Whenever you're ready, we can continue where we left off."
+        : "";
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        outOfScope: true,
+        outOfScopeReason: "website_development",
+        bookingDraftPreserved: bookingContextActive,
+        language: detectedLanguage,
+        reply: `${getWebsiteDevelopmentReply(detectedLanguage)}${draftContinuation}`,
+        stage: state.stage,
       });
     }
 
@@ -1085,6 +1123,15 @@ export default async function handler(request, response) {
         language: analysis.language === "es" ? "es" : "en",
         reply: getOutOfScopeReply(analysis.language),
         stage: "idle",
+      });
+    }
+
+    if (bookingContextActive && analysis.separateProjectQuestion === true) {
+      return response.status(200).json({
+        ok: true,
+        handled: false,
+        bookingDraftPreserved: true,
+        stage: state.stage,
       });
     }
 
