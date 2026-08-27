@@ -79,12 +79,48 @@ function isEmojiOnlyMessage(value) {
   return remainder.length === 0;
 }
 
-function isCourtesyOnlyMessage(value) {
-  const text = normalizeForIntent(value).replace(/[.!?,]+$/g, "").trim();
+export function isCourtesyOnlyMessage(value) {
+  const text = normalizeForIntent(value)
+    .replace(/[.!?,]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   if (!text || text.length > 80) return false;
-  return /^(gracias|muchas gracias|mil gracias|gracias por todo|perfecto gracias|ok gracias|thank you|thanks|thanks a lot|perfect thank you)$/.test(
+  return /^(gracias|muchas gracias|mil gracias|gracias por todo|chevere( gracias)?|listo( gracias)?|perfecto( gracias)?|dale( gracias)?|ok( gracias| perfecto| excelente)?|esta bien|entendido|nos vemos|thank you|thanks|thanks a lot|perfect( thank you)?|great( thanks)?|all set( thanks)?|okay( thanks)?|ok( thanks)?|see you)$/.test(
     text,
   );
+}
+
+export function isResidentialPropertyMessage(value) {
+  const text = normalizeForIntent(value);
+  return /\b(mi casa|en casa|casa residencial|vivienda|residencia|residencial|my house|my home|at home|residential|residence)\b/.test(text);
+}
+
+function selectsPreviousProperty(value) {
+  const text = normalizeForIntent(value);
+  return /^(si|sí|yes|la misma|esa misma|misma direccion|misma propiedad|same one|same address|same property)\b/.test(text);
+}
+
+function selectsAnotherProperty(value) {
+  const text = normalizeForIntent(value);
+  return /\b(otra direccion|otra propiedad|otro local|otra ubicacion|different address|another property|different property|another location)\b/.test(text);
+}
+
+function selectedKnownPropertyIndex(value, maximum) {
+  const text = normalizeForIntent(value);
+  const match = /^(?:opcion |option )?([1-3])\b/.exec(text);
+  if (!match) return null;
+  const index = Number(match[1]) - 1;
+  return index >= 0 && index < maximum ? index : null;
+}
+
+function extractEmail(value) {
+  const match = normalizeText(value, 500).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match?.[0]?.toLowerCase() ?? null;
+}
+
+function declinesEmail(value) {
+  const text = normalizeForIntent(value);
+  return /^(no|no gracias|solo whatsapp|por whatsapp|sin correo|prefiero whatsapp|skip|no thanks|whatsapp only|no email|i prefer whatsapp)\b/.test(text);
 }
 
 function isClearlyOutOfScopeService(value) {
@@ -125,6 +161,11 @@ function defaultState() {
     propertyType: null,
     projectAddress: null,
     projectScope: null,
+    email: null,
+    emailAsked: false,
+    previousPropertyAddress: null,
+    previousPropertyType: null,
+    knownProperties: [],
     preferredDate: null,
     preferredPeriod: null,
     offeredSlots: [],
@@ -141,6 +182,7 @@ function normalizeState(value) {
     ...defaultState(),
     ...(parsed && typeof parsed === "object" ? parsed : {}),
     offeredSlots: Array.isArray(parsed?.offeredSlots) ? parsed.offeredSlots.slice(0, 3) : [],
+    knownProperties: Array.isArray(parsed?.knownProperties) ? parsed.knownProperties.slice(0, 3) : [],
   };
 }
 
@@ -524,6 +566,47 @@ async function internalPost(request, path, body) {
   return { ok: response.ok, status: response.status, data };
 }
 
+async function initializeAdditionalRequest({ request, contactId, existingState, analysis, language }) {
+  const propertyHistoryResult = await internalPost(request, "/api/calendar-booking", {
+    action: "list_properties",
+    contactIdentifier: contactId,
+  });
+  const knownProperties = propertyHistoryResult.ok && Array.isArray(propertyHistoryResult.data?.properties)
+    ? propertyHistoryResult.data.properties.slice(0, 3)
+    : [];
+  const nextState = applyUpdates(
+    {
+      ...defaultState(),
+      active: true,
+      stage: "confirming_property_for_new_request",
+      language,
+      customerName: existingState.customerName,
+      companyName: existingState.companyName,
+      previousPropertyAddress: existingState.projectAddress,
+      previousPropertyType: existingState.propertyType,
+      knownProperties,
+    },
+    analysis,
+  );
+  nextState.projectAddress = null;
+  nextState.propertyType = null;
+  return nextState;
+}
+
+function additionalPropertyQuestion(state, language) {
+  const propertyLines = state.knownProperties
+    .map((property, index) => `${index + 1}. ${property.address}`)
+    .join("\n");
+  if (state.knownProperties.length > 1) {
+    return language === "es"
+      ? `Claro. ¿Para cuál propiedad necesitas este nuevo servicio?\n\n${propertyLines}\n${state.knownProperties.length + 1}. Otra propiedad\n\nPuedes responder con el número o escribir la dirección.`
+      : `Of course. Which property needs this new service?\n\n${propertyLines}\n${state.knownProperties.length + 1}. Another property\n\nYou can reply with the number or enter the address.`;
+  }
+  return language === "es"
+    ? `Claro. ¿Este nuevo trabajo es para la propiedad ubicada en ${state.previousPropertyAddress}, o para otra dirección?`
+    : `Of course. Is this new work for the property at ${state.previousPropertyAddress}, or for a different address?`;
+}
+
 async function analyzeMessage({ currentMessage, history, state }) {
   const systemPrompt = `You extract scheduling information for NEXT SOLUTIONS PARTNERS, a commercial general contractor in Dallas-Fort Worth.
 Return one JSON object only. Do not write customer-facing prose.
@@ -540,6 +623,10 @@ explicitConfirmation is true only when the assistant previously presented a book
 cancelBooking is true only when the customer clearly cancels or stops the scheduling process.
 changeOrCancelExisting is true if the customer wants to change or cancel a request already submitted for team approval.
 separateProjectQuestion is true when the CURRENT message asks a company, service, construction, property, or project question that is separate from answering the pending scheduling question. A booking state being active does not by itself make a separate project question booking-related.
+newBookingRequest is true only when the customer clearly wants a new or additional visit, service, project, or property request rather than asking about an existing appointment.
+existingBookingQuestion is true when the customer is asking about the status or details of an appointment already submitted or confirmed.
+propertyUse is residential when the customer says the work is for a house, home, residence, or residential property; commercial when clearly stated; otherwise unknown.
+customerCorrectingAssistant is true when the customer says the assistant misunderstood, mentions that the prior response was unrelated, or corrects what service/property they meant.
 
 Required JSON keys:
 {
@@ -549,6 +636,10 @@ Required JSON keys:
   "cancelBooking": boolean,
   "changeOrCancelExisting": boolean,
   "separateProjectQuestion": boolean,
+  "newBookingRequest": boolean,
+  "existingBookingQuestion": boolean,
+  "propertyUse": "residential" | "commercial" | "unknown",
+  "customerCorrectingAssistant": boolean,
   "explicitConfirmation": boolean,
   "selectedOption": number | null,
   "customerName": string | null,
@@ -556,6 +647,7 @@ Required JSON keys:
   "propertyType": string | null,
   "projectAddress": string | null,
   "projectScope": string | null,
+  "email": string | null,
   "preferredDate": string | null,
   "preferredPeriod": "morning" | "afternoon" | "any" | null
 }`;
@@ -606,6 +698,8 @@ function applyUpdates(state, analysis) {
     const value = normalizeText(analysis?.[field], field === "projectScope" ? 2000 : 500);
     if (value) next[field] = value;
   }
+  const email = extractEmail(analysis?.email);
+  if (email) next.email = email;
   if (["es", "en"].includes(analysis?.language)) next.language = analysis.language;
   return next;
 }
@@ -842,9 +936,9 @@ function confirmationReply(state, language) {
     ? formatSlotDisplay(state.selectedStart, language)
     : state.selectedDisplay;
   if (language === "es") {
-    return `Antes de enviar la solicitud, confirma por favor estos datos:\n\nNombre: ${state.customerName}\nPropiedad: ${state.propertyType}\nDirección: ${state.projectAddress}\nTrabajo: ${state.projectScope}\nHorario solicitado: ${selectedDisplay}\n\nEste horario quedará pendiente de aprobación del equipo. ¿Confirmas que deseas enviar la solicitud?`;
+    return `Antes de enviar la solicitud, confirma por favor estos datos:\n\nNombre: ${state.customerName}\nPropiedad: ${state.propertyType}\nDirección: ${state.projectAddress}\nTrabajo: ${state.projectScope}\nCorreo: ${state.email || "No proporcionado"}\nHorario solicitado: ${selectedDisplay}\n\nEste horario quedará pendiente de aprobación del equipo. ¿Confirmas que deseas enviar la solicitud?`;
   }
-  return `Before I submit the request, please confirm these details:\n\nName: ${state.customerName}\nProperty: ${state.propertyType}\nAddress: ${state.projectAddress}\nWork requested: ${state.projectScope}\nRequested time: ${selectedDisplay}\n\nThis time will remain pending team approval. Would you like me to submit the request?`;
+  return `Before I submit the request, please confirm these details:\n\nName: ${state.customerName}\nProperty: ${state.propertyType}\nAddress: ${state.projectAddress}\nWork requested: ${state.projectScope}\nEmail: ${state.email || "Not provided"}\nRequested time: ${selectedDisplay}\n\nThis time will remain pending team approval. Would you like me to submit the request?`;
 }
 
 function pendingReply(state, language) {
@@ -951,6 +1045,33 @@ export default async function handler(request, response) {
 
     const bookingContextActive = state.active || state.stage !== "idle";
 
+    const detectedLanguage = analysis.language === "es" ? "es" : "en";
+    const residentialRequest =
+      analysis.propertyUse === "residential" ||
+      isResidentialPropertyMessage(effectiveCurrentMessage) ||
+      (analysis.customerCorrectingAssistant === true &&
+        isResidentialPropertyMessage(JSON.stringify(history.slice(-6))));
+
+    if (residentialRequest && state.stage === "idle") {
+      const correctionPrefix = analysis.customerCorrectingAssistant
+        ? detectedLanguage === "es"
+          ? "Tienes razón; entendí incorrectamente tu solicitud. Disculpa la confusión. "
+          : "You're right; I misunderstood your request. I apologize for the confusion. "
+        : "";
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        outOfScope: true,
+        outOfScopeReason: "residential",
+        language: detectedLanguage,
+        reply:
+          detectedLanguage === "es"
+            ? `${correctionPrefix}Actualmente NEXT SOLUTIONS PARTNERS atiende proyectos y servicios de HVAC en propiedades comerciales, por lo que no podemos programar este servicio residencial.`
+            : `${correctionPrefix}NEXT SOLUTIONS PARTNERS currently provides projects and HVAC services for commercial properties, so we cannot schedule this residential service.`,
+        stage: "idle",
+      });
+    }
+
     if (
       state.stage === "idle" &&
       (analysis.serviceInScope === false ||
@@ -993,6 +1114,24 @@ export default async function handler(request, response) {
         });
       }
 
+      if (analysis.newBookingRequest === true && !analysis.changeOrCancelExisting) {
+        const nextState = await initializeAdditionalRequest({
+          request,
+          contactId,
+          existingState: state,
+          analysis,
+          language: confirmedLanguage,
+        });
+        await saveState(contactId, nextState);
+        return response.status(200).json({
+          ok: true,
+          handled: true,
+          language: confirmedLanguage,
+          reply: additionalPropertyQuestion(nextState, confirmedLanguage),
+          stage: nextState.stage,
+        });
+      }
+
       const confirmedFirstName = getFirstName(state);
 
       return response.status(200).json({
@@ -1008,11 +1147,98 @@ export default async function handler(request, response) {
       });
     }
 
+    if (
+      state.stage === "pending_approval" &&
+      analysis.newBookingRequest === true &&
+      !analysis.changeOrCancelExisting
+    ) {
+      const pendingLanguage =
+        analysis.language === "es" ? "es" : state.language === "es" ? "es" : "en";
+      const nextState = await initializeAdditionalRequest({
+        request,
+        contactId,
+        existingState: state,
+        analysis,
+        language: pendingLanguage,
+      });
+      await saveState(contactId, nextState);
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        language: pendingLanguage,
+        reply: additionalPropertyQuestion(nextState, pendingLanguage),
+        stage: nextState.stage,
+      });
+    }
+
     if (!analysis.bookingRelated && state.stage === "pending_approval") {
       return response.status(200).json({ ok: true, handled: false, stage: state.stage });
     }
 
     const language = analysis.language === "es" ? "es" : state.language === "es" ? "es" : "en";
+
+    if (state.stage === "confirming_property_for_new_request") {
+      const knownPropertyIndex = selectedKnownPropertyIndex(
+        effectiveCurrentMessage,
+        state.knownProperties.length,
+      );
+      const selectedAnotherOption =
+        normalizeForIntent(effectiveCurrentMessage) ===
+        String(state.knownProperties.length + 1);
+      if (knownPropertyIndex !== null) {
+        const selectedProperty = state.knownProperties[knownPropertyIndex];
+        state.projectAddress = selectedProperty.address;
+        state.propertyType = selectedProperty.propertyType || null;
+        state.stage = "collecting_details";
+      } else if (isCompleteProjectAddress(effectiveCurrentMessage)) {
+        state.projectAddress = normalizeText(effectiveCurrentMessage, 500);
+        state.propertyType = null;
+        state.stage = "collecting_details";
+      } else if (selectsPreviousProperty(effectiveCurrentMessage)) {
+        state.projectAddress = state.previousPropertyAddress;
+        state.propertyType = state.previousPropertyType;
+        state.stage = "collecting_details";
+      } else if (selectedAnotherOption || selectsAnotherProperty(effectiveCurrentMessage)) {
+        state.projectAddress = null;
+        state.propertyType = null;
+        state.stage = "collecting_details";
+      } else {
+        await saveState(contactId, state);
+        return response.status(200).json({
+          ok: true,
+          handled: true,
+          language,
+          reply:
+            language === "es"
+              ? `Para asegurarme de usar la ubicación correcta, ¿es para ${state.previousPropertyAddress} o para otra dirección?`
+              : `To make sure I use the correct location, is it for ${state.previousPropertyAddress} or for a different address?`,
+          stage: state.stage,
+        });
+      }
+    }
+
+    if (state.stage === "collecting_email") {
+      const suppliedEmail = extractEmail(effectiveCurrentMessage);
+      if (suppliedEmail) {
+        state.email = suppliedEmail;
+        state.emailAsked = true;
+      } else if (declinesEmail(effectiveCurrentMessage)) {
+        state.email = null;
+        state.emailAsked = true;
+      } else {
+        await saveState(contactId, state);
+        return response.status(200).json({
+          ok: true,
+          handled: true,
+          language,
+          reply:
+            language === "es"
+              ? "No pude identificar un correo válido. Puedes escribirlo nuevamente o decirme que prefieres continuar solo por WhatsApp."
+              : "I could not identify a valid email address. You can enter it again or tell me you prefer to continue through WhatsApp only.",
+          stage: state.stage,
+        });
+      }
+    }
 
     if (
       state.stage === "awaiting_confirmation" &&
@@ -1155,6 +1381,7 @@ export default async function handler(request, response) {
         contactIdentifier: contactId,
         conversationId,
         whatsappNumber: getContactPhone(contact),
+        email: state.email,
         language,
       });
 
@@ -1207,6 +1434,21 @@ export default async function handler(request, response) {
           reply: askForField(missing[0], language, state),
           stage: state.stage,
           missingFields: missing,
+        });
+      }
+
+      if (!state.emailAsked) {
+        state.stage = "collecting_email";
+        await saveState(contactId, state);
+        return response.status(200).json({
+          ok: true,
+          handled: true,
+          language,
+          reply:
+            language === "es"
+              ? "¿A qué correo electrónico te gustaría recibir la confirmación de la visita? Si prefieres continuar únicamente por WhatsApp, también está bien."
+              : "What email address would you like us to use for the visit confirmation? If you prefer to continue through WhatsApp only, that is also fine.",
+          stage: state.stage,
         });
       }
 
