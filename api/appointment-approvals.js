@@ -148,11 +148,17 @@ async function resolveWhatsAppConnection() {
     accounts.find((account) =>
       ["active", "live", "connected"].includes(String(account?.status ?? "").toLowerCase()),
     ) ?? accounts[0];
+
+  // Zernio's inbox-message and broadcast endpoints expect the internal
+  // account record ID returned as `id`/`_id`. The provider-facing WhatsApp
+  // `accountId` can be a different identifier and is rejected by these routes
+  // as an invalid accountId. Prefer Zernio's internal ID for both operations;
+  // retain configured/provider values only as fallbacks for older payloads.
   const accountId = extractExternalId(
-    process.env.ZERNIO_WHATSAPP_ACCOUNT_ID ??
-      selected?.accountId ??
-      selected?.id ??
-      selected?._id,
+    selected?.id ??
+      selected?._id ??
+      process.env.ZERNIO_WHATSAPP_ACCOUNT_ID ??
+      selected?.accountId,
   );
   if (!accountId) throw new Error("No WhatsApp account is available");
   const profileId = extractExternalId(
