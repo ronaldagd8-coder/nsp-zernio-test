@@ -141,6 +141,20 @@ function isResumeBookingIntent(value) {
   );
 }
 
+function isAddressCorrectionIntent(value) {
+  const text = normalizeForIntent(value);
+  if (!text || text.length > 500) return false;
+  const correctionLanguage =
+    /\b(no es|esta mal|direccion correcta|dirección correcta|me equivoque|quise decir|corrige|corregir|is not|isn't|wrong address|correct address|i meant|change the address)\b/.test(
+      text,
+    );
+  const addressSignal =
+    /\b(direccion|address|calle|street|avenue|ave|road|rd|drive|dr|boulevard|blvd|ciudad|city|estado|state|zip|codigo postal|texas|tx)\b/.test(
+      text,
+    );
+  return correctionLanguage && addressSignal;
+}
+
 function extractExplicitOnlyService(value) {
   const text = normalizeForIntent(value).replace(/[.!?]+$/g, "").trim();
   const match = /^(?:no[, ]+)?(?:mejor\s+)?(?:solo|solamente|only)\s+(?:la |el |the )?(.+)$/.exec(text);
@@ -304,8 +318,16 @@ export function getOutOfScopeReply(language) {
     : "Thank you for checking with us. That request is outside the commercial construction, remodeling, and building-repair services offered by NEXT SOLUTIONS PARTNERS, so I cannot schedule a visit for that service.";
 }
 
+function formatPersonName(value) {
+  const name = normalizeText(value, 500);
+  if (!name) return "";
+  const isUniformCase = name === name.toLowerCase() || name === name.toUpperCase();
+  if (!isUniformCase) return name;
+  return name.toLowerCase().replace(/(^|[\s'-])\p{L}/gu, (letter) => letter.toUpperCase());
+}
+
 function getFirstName(state) {
-  return normalizeText(state?.customerName, 120).split(/\s+/)[0] || "";
+  return formatPersonName(state?.customerName).split(/\s+/)[0] || "";
 }
 
 function safeJsonParse(value, fallback = null) {
@@ -348,6 +370,7 @@ function normalizeState(value) {
   return {
     ...defaultState(),
     ...(parsed && typeof parsed === "object" ? parsed : {}),
+    customerName: formatPersonName(parsed?.customerName) || null,
     offeredSlots: Array.isArray(parsed?.offeredSlots) ? parsed.offeredSlots.slice(0, 3) : [],
     knownProperties: Array.isArray(parsed?.knownProperties) ? parsed.knownProperties.slice(0, 3) : [],
   };
@@ -863,7 +886,7 @@ function applyUpdates(state, analysis) {
   ];
   for (const field of fields) {
     const value = normalizeText(analysis?.[field], field === "projectScope" ? 2000 : 500);
-    if (value) next[field] = value;
+    if (value) next[field] = field === "customerName" ? formatPersonName(value) : value;
   }
   const email = extractEmail(analysis?.email);
   if (email) next.email = email;
@@ -1126,9 +1149,9 @@ function confirmationReply(state, language) {
     ? formatSlotDisplay(state.selectedStart, language)
     : state.selectedDisplay;
   if (language === "es") {
-    return `Antes de enviar la solicitud, confirma por favor estos datos:\n\nNombre: ${state.customerName}\nPropiedad: ${state.propertyType}\nDirección: ${state.projectAddress}\nTrabajo: ${state.projectScope}\nCorreo: ${state.email || "No proporcionado"}\nHorario solicitado: ${selectedDisplay}\n\nEste horario quedará pendiente de aprobación del equipo. ¿Confirmas que deseas enviar la solicitud?`;
+    return `Antes de enviar la solicitud, confirma por favor estos datos:\n\nNombre: ${formatPersonName(state.customerName)}\nPropiedad: ${state.propertyType}\nDirección: ${state.projectAddress}\nTrabajo: ${state.projectScope}\nCorreo: ${state.email || "No proporcionado"}\nHorario solicitado: ${selectedDisplay}\n\nEste horario quedará pendiente de aprobación del equipo. ¿Confirmas que deseas enviar la solicitud?`;
   }
-  return `Before I submit the request, please confirm these details:\n\nName: ${state.customerName}\nProperty: ${state.propertyType}\nAddress: ${state.projectAddress}\nWork requested: ${state.projectScope}\nEmail: ${state.email || "Not provided"}\nRequested time: ${selectedDisplay}\n\nThis time will remain pending team approval. Would you like me to submit the request?`;
+  return `Before I submit the request, please confirm these details:\n\nName: ${formatPersonName(state.customerName)}\nProperty: ${state.propertyType}\nAddress: ${state.projectAddress}\nWork requested: ${state.projectScope}\nEmail: ${state.email || "Not provided"}\nRequested time: ${selectedDisplay}\n\nThis time will remain pending team approval. Would you like me to submit the request?`;
 }
 
 function pendingReply(state, language) {
@@ -1314,6 +1337,34 @@ export default async function handler(request, response) {
         language: analysis.language === "es" ? "es" : "en",
         reply: getOutOfScopeReply(analysis.language),
         stage: "idle",
+      });
+    }
+
+    if (
+      bookingContextActive &&
+      state.stage !== "pending_approval" &&
+      state.stage !== "confirmed" &&
+      isAddressCorrectionIntent(effectiveCurrentMessage)
+    ) {
+      state.customerName = formatPersonName(state.customerName);
+      state.projectAddress = null;
+      state.stage = "collecting_details";
+      state.active = true;
+      await saveState(contactId, state);
+      const correctionLanguage =
+        analysis.language === "es" ? "es" : state.language === "es" ? "es" : "en";
+      const correctionName = getFirstName(state);
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        bookingDraftPreserved: true,
+        addressCorrectionRequested: true,
+        language: correctionLanguage,
+        reply:
+          correctionLanguage === "es"
+            ? `Entendido${correctionName ? `, ${correctionName}` : ""}. No enviaré la solicitud todavía. Para actualizar la ubicación sin asumir ningún dato, escribe por favor la dirección física completa corregida, incluyendo número, calle, ciudad, estado y código postal si lo tienes.`
+            : `Understood${correctionName ? `, ${correctionName}` : ""}. I will not submit the request yet. To update the location without assuming any details, please enter the complete corrected physical address, including the street number, street name, city, state, and ZIP code if available.`,
+        stage: state.stage,
       });
     }
 
