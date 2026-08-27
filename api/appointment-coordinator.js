@@ -29,6 +29,58 @@ function normalizeForIntent(value) {
     .trim();
 }
 
+const DFW_LOCATION_PATTERN = /\b(dallas|fort worth|arlington|plano|frisco|mckinney|denton|lewisville|carrollton|richardson|garland|irving|grand prairie|mesquite|allen|grapevine|southlake|coppell|addison|farmers branch|the colony|little elm|prosper|celina|aubrey|flower mound|highland village|keller|roanoke|trophy club|north richland hills|haltom city|hurst|euless|bedford|mansfield|burleson|crowley|aledo|weatherford|rockwall|rowlett|sachse|wylie|murphy|forney|terrell|waxahachie|midlothian|cedar hill|desoto|duncanville|lancaster|red oak|ennis|cleburne|granbury|decatur)\b/;
+const CLEARLY_OUTSIDE_DFW_TEXAS_PATTERN = /\b(houston|austin|san antonio|el paso|corpus christi|lubbock|amarillo|midland|odessa|waco|killeen|temple|beaumont|mcallen|laredo|brownsville|galveston|tyler|longview|abilene|college station|bryan)\b/;
+const NON_TEXAS_STATE_PATTERN = /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oclajoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming)\b/;
+const NON_TEXAS_POSTAL_CODE_PATTERN = /(?:,\s*|\b(?:in|en)\s+)(al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|ut|vt|va|wa|wv|wi|wy)(?:\s+\d{5}(?:-\d{4})?|\s*$)/;
+
+function serviceAreaSignal(value) {
+  const text = normalizeForIntent(value);
+  if (!text) return "unknown";
+  if (DFW_LOCATION_PATTERN.test(text)) return "inside_dfw";
+  if (
+    NON_TEXAS_STATE_PATTERN.test(text) ||
+    NON_TEXAS_POSTAL_CODE_PATTERN.test(text) ||
+    CLEARLY_OUTSIDE_DFW_TEXAS_PATTERN.test(text)
+  ) {
+    return "outside_dfw";
+  }
+  return "unknown";
+}
+
+function isPlausiblePropertyTypeAnswer(value) {
+  const text = normalizeForIntent(value);
+  if (!isSpecificPropertyType(text)) return false;
+  if (serviceAreaSignal(text) !== "unknown") return false;
+  if (
+    /\b(el |the )?(trabajo|proyecto|propiedad|work|project|property) (es|esta|queda|seria|is|would be|is located) (en|in)\b/.test(
+      text,
+    ) ||
+    /\b(ubicad[oa] en|located in|direccion|address|ciudad|city|estado|state|codigo postal|zip)\b/.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function projectScopeSupportedByCurrentMessage(scope, currentMessage) {
+  const stopWords = new Set([
+    "para", "quiero", "necesito", "otra", "nuevo", "nueva", "cita", "visita",
+    "proyecto", "trabajo", "servicio", "the", "for", "want", "need", "another",
+    "new", "appointment", "visit", "project", "work", "service", "with", "and",
+  ]);
+  const stems = (value) =>
+    normalizeForIntent(value)
+      .split(/[^a-z0-9]+/)
+      .filter((token) => token.length >= 4 && !stopWords.has(token))
+      .map((token) => token.slice(0, 4));
+  const scopeStems = stems(scope);
+  const messageStems = new Set(stems(currentMessage));
+  return scopeStems.some((stem) => messageStems.has(stem));
+}
+
 function isDirectConfirmation(value) {
   const text = normalizeForIntent(value);
   if (!text || text.length > 120) return false;
@@ -904,7 +956,7 @@ async function internalPost(request, path, body) {
   return { ok: response.ok, status: response.status, data };
 }
 
-async function initializeAdditionalRequest({ request, contactId, existingState, analysis, language }) {
+async function initializeAdditionalRequest({ request, contactId, existingState, analysis, language, currentMessage }) {
   const propertyHistoryResult = await internalPost(request, "/api/calendar-booking", {
     action: "list_properties",
     contactIdentifier: contactId,
@@ -928,6 +980,9 @@ async function initializeAdditionalRequest({ request, contactId, existingState, 
   );
   nextState.projectAddress = null;
   nextState.propertyType = null;
+  if (!projectScopeSupportedByCurrentMessage(nextState.projectScope, currentMessage)) {
+    nextState.projectScope = null;
+  }
   return nextState;
 }
 
@@ -1126,7 +1181,7 @@ function applyExpectedFieldAnswer(state, analysis, currentMessage) {
     expectedField === "propertyType" &&
     !normalizeText(nextAnalysis.propertyType) &&
     answer.length <= 120 &&
-    isSpecificPropertyType(answer)
+    isPlausiblePropertyTypeAnswer(answer)
   ) {
     nextAnalysis.propertyType = answer;
   }
@@ -1432,6 +1487,32 @@ export default async function handler(request, response) {
       state,
     });
 
+    const currentServiceAreaSignal = serviceAreaSignal(effectiveCurrentMessage);
+    if (currentServiceAreaSignal === "outside_dfw") {
+      const serviceAreaLanguage =
+        analysis.language === "es" ? "es" : state.language === "es" ? "es" : "en";
+      const serviceAreaName = getFirstName(state);
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        outsideServiceArea: true,
+        bookingDraftPreserved: state.active || state.stage !== "idle",
+        language: serviceAreaLanguage,
+        reply:
+          serviceAreaLanguage === "es"
+            ? `Entiendo${serviceAreaName ? `, ${serviceAreaName}` : ""}. NEXT SOLUTIONS PARTNERS atiende el área de Dallas–Fort Worth y el DFW Metroplex, por lo que no puedo programar una visita para esa ubicación. Si tienes otra propiedad comercial dentro del Metroplex, puedo ayudarte con esa solicitud.`
+            : `I understand${serviceAreaName ? `, ${serviceAreaName}` : ""}. NEXT SOLUTIONS PARTNERS serves Dallas–Fort Worth and the DFW Metroplex, so I cannot schedule a visit for that location. If you have another commercial property within the Metroplex, I can help with that request.`,
+        stage: state.stage,
+      });
+    }
+
+    if (
+      normalizeText(analysis.propertyType) &&
+      !isPlausiblePropertyTypeAnswer(analysis.propertyType)
+    ) {
+      analysis.propertyType = null;
+    }
+
     const inferredPropertyType = inferPropertyTypeFromMessage(
       effectiveCurrentMessage,
       analysis.language,
@@ -1624,7 +1705,7 @@ export default async function handler(request, response) {
     if (
       isGreetingOnlyMessage(effectiveCurrentMessage) &&
       getFirstName(state) &&
-      ["confirmed", "pending_approval"].includes(state.stage)
+      state.stage !== "idle"
     ) {
       const greetingLanguage =
         analysis.language === "es" ? "es" : state.language === "es" ? "es" : "en";
@@ -1674,6 +1755,7 @@ export default async function handler(request, response) {
           existingState: state,
           analysis,
           language: confirmedLanguage,
+          currentMessage: effectiveCurrentMessage,
         });
         await saveState(contactId, nextState);
         return response.status(200).json({
@@ -1713,6 +1795,7 @@ export default async function handler(request, response) {
         existingState: state,
         analysis,
         language: pendingLanguage,
+        currentMessage: effectiveCurrentMessage,
       });
       await saveState(contactId, nextState);
       return response.status(200).json({
