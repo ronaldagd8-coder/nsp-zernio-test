@@ -323,6 +323,17 @@ export function isCourtesyOnlyMessage(value) {
   );
 }
 
+function isGreetingOnlyMessage(value) {
+  const text = normalizeForIntent(value)
+    .replace(/[.!?,]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text || text.length > 80) return false;
+  return /^(hola|hola buenos dias|hola buenas tardes|hola buenas noches|buenos dias|buenas tardes|buenas noches|hello|hi|hey|good morning|good afternoon|good evening)$/.test(
+    text,
+  );
+}
+
 export function isResidentialPropertyMessage(value) {
   const text = normalizeForIntent(value);
   return /\b(mi casa|en casa|casa residencial|vivienda|residencia|residencial|my house|my home|at home|residential|residence)\b/.test(text);
@@ -921,17 +932,42 @@ async function initializeAdditionalRequest({ request, contactId, existingState, 
 }
 
 function additionalPropertyQuestion(state, language) {
+  const firstName = getFirstName(state);
+  const personalizedOpening = firstName
+    ? language === "es"
+      ? `Hola, ${firstName}. Claro, `
+      : `Hello, ${firstName}. Of course, `
+    : language === "es"
+      ? "Claro, "
+      : "Of course, ";
   const propertyLines = state.knownProperties
     .map((property, index) => `${index + 1}. ${property.address}`)
     .join("\n");
   if (state.knownProperties.length > 1) {
     return language === "es"
-      ? `Claro. ¿Para cuál propiedad necesitas este nuevo servicio?\n\n${propertyLines}\n${state.knownProperties.length + 1}. Otra propiedad\n\nPuedes responder con el número o escribir la dirección.`
-      : `Of course. Which property needs this new service?\n\n${propertyLines}\n${state.knownProperties.length + 1}. Another property\n\nYou can reply with the number or enter the address.`;
+      ? `${personalizedOpening}¿para cuál propiedad necesitas este nuevo servicio?\n\n${propertyLines}\n${state.knownProperties.length + 1}. Otra propiedad\n\nPuedes responder con el número o escribir la dirección.`
+      : `${personalizedOpening}which property needs this new service?\n\n${propertyLines}\n${state.knownProperties.length + 1}. Another property\n\nYou can reply with the number or enter the address.`;
   }
   return language === "es"
-    ? `Claro. ¿Este nuevo trabajo es para la propiedad ubicada en ${state.previousPropertyAddress}, o para otra dirección?`
-    : `Of course. Is this new work for the property at ${state.previousPropertyAddress}, or for a different address?`;
+    ? `${personalizedOpening}¿este nuevo trabajo es para la propiedad ubicada en ${state.previousPropertyAddress}, o para otra dirección?`
+    : `${personalizedOpening}is this new work for the property at ${state.previousPropertyAddress}, or for a different address?`;
+}
+
+function returningCustomerGreeting(state, language, message) {
+  const firstName = getFirstName(state);
+  const text = normalizeForIntent(message);
+
+  if (language === "es") {
+    if (text.includes("buenos dias")) return `Buenos días, ${firstName}. ¿En qué puedo ayudarte hoy?`;
+    if (text.includes("buenas tardes")) return `Buenas tardes, ${firstName}. ¿En qué puedo ayudarte hoy?`;
+    if (text.includes("buenas noches")) return `Buenas noches, ${firstName}. ¿En qué puedo ayudarte hoy?`;
+    return `Hola, ${firstName}. ¿En qué puedo ayudarte hoy?`;
+  }
+
+  if (text.includes("good morning")) return `Good morning, ${firstName}. How can I help you today?`;
+  if (text.includes("good afternoon")) return `Good afternoon, ${firstName}. How can I help you today?`;
+  if (text.includes("good evening")) return `Good evening, ${firstName}. How can I help you today?`;
+  return `Hello, ${firstName}. How can I help you today?`;
 }
 
 async function analyzeMessage({ currentMessage, history, state }) {
@@ -1581,6 +1617,26 @@ export default async function handler(request, response) {
         bookingDraftPreserved: true,
         language: resumeLanguage,
         reply: resumeBookingReply(state, resumeLanguage),
+        stage: state.stage,
+      });
+    }
+
+    if (
+      isGreetingOnlyMessage(effectiveCurrentMessage) &&
+      getFirstName(state) &&
+      ["confirmed", "pending_approval"].includes(state.stage)
+    ) {
+      const greetingLanguage =
+        analysis.language === "es" ? "es" : state.language === "es" ? "es" : "en";
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        language: greetingLanguage,
+        reply: returningCustomerGreeting(
+          state,
+          greetingLanguage,
+          effectiveCurrentMessage,
+        ),
         stage: state.stage,
       });
     }
