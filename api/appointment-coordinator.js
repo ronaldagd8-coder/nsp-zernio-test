@@ -395,13 +395,20 @@ function normalizePhone(value) {
 async function resolveContactId(identifier) {
   if (!identifier) return null;
 
-  const directResponse = await zernioFetch(
-    `/contacts/${encodeURIComponent(identifier)}`,
+  const normalizedIdentifier = normalizeText(String(identifier), 200);
+  const looksLikePhone = /^\+?\d{7,15}$/.test(
+    normalizedIdentifier.replace(/[\s().-]/g, ""),
   );
 
-  if (directResponse.ok) {
-    const directData = await directResponse.json();
-    return directData?.contact?.id ?? directData?.id ?? identifier;
+  if (!looksLikePhone) {
+    const directResponse = await zernioFetch(
+      `/contacts/${encodeURIComponent(normalizedIdentifier)}`,
+    );
+
+    if (directResponse.ok) {
+      const directData = await directResponse.json();
+      return directData?.contact?.id ?? directData?.id ?? normalizedIdentifier;
+    }
   }
 
   const targetPhone = normalizePhone(identifier);
@@ -630,7 +637,7 @@ async function resolveWhatsAppAccountId() {
         String(account?.status ?? "").toLowerCase(),
       ),
     ) ?? accounts[0];
-  return selected?.id ?? selected?._id ?? selected?.accountId ?? null;
+  return selected?.accountId ?? selected?.id ?? selected?._id ?? null;
 }
 
 function messageToHistoryLine(message) {
