@@ -99,6 +99,25 @@ function getMessageText(message) {
   return normalizeMessageCandidate(message);
 }
 
+export function getQuotedMessageId(message) {
+  const candidates = [
+    message?.metadata?.quotedMessageId,
+    message?.quotedMessageId,
+    message?.context?.id,
+    message?.message?.metadata?.quotedMessageId,
+    message?.payload?.metadata?.quotedMessageId,
+    message?.data?.metadata?.quotedMessageId,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim().slice(0, 500);
+    }
+  }
+
+  return null;
+}
+
 function extractAccounts(data) {
   const candidates = [
     data?.accounts,
@@ -338,6 +357,7 @@ export default async function handler(
         transcript: null,
         messageText: getMessageText(latestMessage) || null,
         conversationId: conversationId.trim(),
+        quotedMessageId: getQuotedMessageId(latestMessage),
       });
     }
 
@@ -464,6 +484,7 @@ export default async function handler(
       transcript,
       messageText: transcript,
       conversationId: conversationId.trim(),
+      quotedMessageId: getQuotedMessageId(latestMessage),
     });
   } catch (error) {
     console.error(
