@@ -3,6 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 const ZERNIO_API_BASE_URL = "https://zernio.com/api/v1";
 const OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
 const BOOKING_FIELD_NAME = "booking_state";
+const CUSTOMER_REVIEW_FIELD_NAME = "service_review_state";
 const MAX_HISTORY_MESSAGES = 15;
 
 export const config = {
@@ -1187,6 +1188,29 @@ async function saveState(contactId, state) {
   if (!response.ok) throw new Error(`Booking state update failed: ${response.status}`);
 }
 
+async function saveCustomerReviewState(contactId, reviewState) {
+  const response = await zernioFetch(
+    `/contacts/${encodeURIComponent(contactId)}/fields/${CUSTOMER_REVIEW_FIELD_NAME}`,
+    { method: "PUT", body: JSON.stringify({ value: JSON.stringify(reviewState) }) },
+  );
+  if (!response.ok) throw new Error(`Customer review state update failed: ${response.status}`);
+}
+
+export function awaitingReviewedServiceVisitConfirmation(value, conversationId = "") {
+  const review = safeJsonParse(value, null);
+  if (!review || typeof review !== "object") return null;
+  if (review.status !== "resolved" || review.decision !== "evaluate") return null;
+  if (review.awaitingVisitConfirmation === false || review.visitRequestStartedAt) return null;
+  const service = normalizeText(review.service, 500);
+  if (!service) return null;
+  const reviewConversationId = normalizeText(review.customerConversationId, 300);
+  const currentConversationId = normalizeText(conversationId, 300);
+  if (reviewConversationId && currentConversationId && reviewConversationId !== currentConversationId) {
+    return null;
+  }
+  return { ...review, service };
+}
+
 function getBaseUrl(request) {
   const forwardedHost = normalizeText(request.headers["x-forwarded-host"], 300);
   const host = forwardedHost || normalizeText(request.headers.host, 300);
@@ -1255,6 +1279,11 @@ function additionalPropertyQuestion(state, language) {
     return language === "es"
       ? `${personalizedOpening}¿para cuál propiedad necesitas este nuevo servicio?\n\n${propertyLines}\n${state.knownProperties.length + 1}. Otra propiedad\n\nPuedes responder con el número o escribir la dirección.`
       : `${personalizedOpening}which property needs this new service?\n\n${propertyLines}\n${state.knownProperties.length + 1}. Another property\n\nYou can reply with the number or enter the address.`;
+  }
+  if (!normalizeText(state.previousPropertyAddress, 500)) {
+    return language === "es"
+      ? `${personalizedOpening}¿cuál es la dirección completa de la propiedad comercial donde necesitas este servicio?`
+      : `${personalizedOpening}what is the complete address of the commercial property where you need this service?`;
   }
   return language === "es"
     ? `${personalizedOpening}¿este nuevo trabajo es para la propiedad ubicada en ${state.previousPropertyAddress}, o para otra dirección?`
@@ -1736,7 +1765,45 @@ export default async function handler(request, response) {
 
     const customFields = getCustomFields(contact);
     let state = normalizeState(customFields?.[BOOKING_FIELD_NAME]);
+    const reviewedServiceVisit = awaitingReviewedServiceVisitConfirmation(
+      customFields?.[CUSTOMER_REVIEW_FIELD_NAME],
+      conversationId,
+    );
     const contactGreetingName = getContactGreetingName(contact);
+
+    if (reviewedServiceVisit && isDirectConfirmation(effectiveCurrentMessage)) {
+      const reviewLanguage = reviewedServiceVisit.language === "en" ? "en" : "es";
+      const nextState = await initializeAdditionalRequest({
+        request,
+        contactId,
+        existingState: state,
+        analysis: {
+          language: reviewLanguage,
+          bookingRelated: true,
+          newBookingRequest: true,
+          newCommercialProject: true,
+          projectScope: reviewedServiceVisit.service,
+        },
+        language: reviewLanguage,
+        currentMessage: effectiveCurrentMessage,
+      });
+      nextState.projectScope = reviewedServiceVisit.service;
+      await saveState(contactId, nextState);
+      await saveCustomerReviewState(contactId, {
+        ...reviewedServiceVisit,
+        awaitingVisitConfirmation: false,
+        visitRequestStartedAt: new Date().toISOString(),
+      });
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        reviewedServiceVisitStarted: true,
+        language: reviewLanguage,
+        reply: additionalPropertyQuestion(nextState, reviewLanguage),
+        stage: nextState.stage,
+      });
+    }
+
     let analysis = await analyzeMessage({
       currentMessage: effectiveCurrentMessage,
       history,
