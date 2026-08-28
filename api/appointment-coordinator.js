@@ -501,6 +501,12 @@ export function recentHistoryHasWebsiteProjectRedirect(history) {
   );
 }
 
+export function hasActiveWebsiteProjectFollowUp(state, now = Date.now()) {
+  if (state?.awaitingWebsiteProjectFollowUp !== true) return false;
+  const markedAt = Date.parse(state?.websiteProjectFollowUpAt ?? "");
+  return Number.isFinite(markedAt) && now - markedAt >= 0 && now - markedAt <= 30 * 60 * 1000;
+}
+
 function getWebsiteDevelopmentReply(language) {
   return language === "es"
     ? "Gracias por consultarnos. NEXT SOLUTIONS PARTNERS se especializa en construcción, remodelación y reparaciones de propiedades comerciales, por lo que no ofrecemos desarrollo de páginas web."
@@ -558,6 +564,8 @@ function defaultState() {
     selectedStart: null,
     selectedDisplay: null,
     eventId: null,
+    awaitingWebsiteProjectFollowUp: false,
+    websiteProjectFollowUpAt: null,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -1596,7 +1604,8 @@ export default async function handler(request, response) {
     const continuesWebsiteProjectRedirect =
       Boolean(inferredPropertyType) &&
       /^(si|sí|yes)\b/i.test(normalizeText(effectiveCurrentMessage, 500)) &&
-      recentHistoryHasWebsiteProjectRedirect(history);
+      (hasActiveWebsiteProjectFollowUp(state) ||
+        recentHistoryHasWebsiteProjectRedirect(history));
     if (continuesWebsiteProjectRedirect) {
       analysis.newCommercialProject = true;
     }
@@ -1708,6 +1717,9 @@ export default async function handler(request, response) {
     }
 
     if (isWebsiteDevelopmentRequest(effectiveCurrentMessage)) {
+      state.awaitingWebsiteProjectFollowUp = true;
+      state.websiteProjectFollowUpAt = new Date().toISOString();
+      await saveState(contactId, state);
       return response.status(200).json({
         ok: true,
         handled: true,
