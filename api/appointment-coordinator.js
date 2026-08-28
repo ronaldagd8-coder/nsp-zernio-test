@@ -117,6 +117,27 @@ export function selectInternalReviewService(projectScope, currentMessage) {
     : cleanInternalReviewService(currentScope) || analyzedScope;
 }
 
+export function selectInternalReviewProperty({
+  inferredPropertyType,
+  analyzedAddress,
+  currentMessage,
+}) {
+  const propertyType = normalizeText(inferredPropertyType, 200);
+  const address = normalizeText(analyzedAddress, 500);
+  const comparable = (value) => normalizeForIntent(value)
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  const comparableAddress = comparable(address);
+  const currentMessageIncludesAddress =
+    isCompleteProjectAddress(address) &&
+    comparableAddress &&
+    comparable(currentMessage).includes(comparableAddress);
+  const verifiedAddress = currentMessageIncludesAddress ? address : "";
+  return [propertyType, verifiedAddress]
+    .filter(Boolean)
+    .join(" — ") || "No especificada";
+}
+
 function isSiteAccessQuestion(value) {
   const text = normalizeForIntent(value);
   if (!text || text.length > 1000) return false;
@@ -2040,17 +2061,11 @@ export default async function handler(request, response) {
         analysis.projectScope,
         effectiveCurrentMessage,
       );
-      const reviewPropertyType = normalizeText(
-        analysis.propertyType ?? state.propertyType,
-        200,
-      );
-      const reviewAddress = normalizeText(
-        analysis.projectAddress ?? state.projectAddress,
-        500,
-      );
-      const reviewProperty = [reviewPropertyType, reviewAddress]
-        .filter(Boolean)
-        .join(" — ") || "No especificada";
+      const reviewProperty = selectInternalReviewProperty({
+        inferredPropertyType,
+        analyzedAddress: analysis.projectAddress,
+        currentMessage: effectiveCurrentMessage,
+      });
       return response.status(200).json({
         ok: true,
         handled: false,
