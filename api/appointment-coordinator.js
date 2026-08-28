@@ -513,17 +513,23 @@ export function requiresInternalServiceReview({
   serviceInScope,
   bookingRelated,
 }) {
-  const candidate = normalizeText(projectScope, 500) || normalizeText(currentMessage, 500);
-  const combinedCandidate = [currentMessage, projectScope].filter(Boolean).join(" ");
+  const currentCandidate = normalizeText(currentMessage, 500);
+  const projectCandidate = normalizeText(projectScope, 500);
   const messageIntent = normalizeForIntent(currentMessage);
   const asksUnconfirmedCapability = isServiceCapabilityQuestion(currentMessage) ||
-    (/\?\s*$/.test(normalizeText(currentMessage, 500)) &&
+    (/\?\s*$/.test(currentCandidate) &&
       /\b(hacen|ofrecen|realizan|revisan|instalan|reparan|mantienen|atienden|do you|can you|provide|service|inspect|install|repair|maintain)\b/.test(messageIntent));
+  const candidate = asksUnconfirmedCapability
+    ? currentCandidate
+    : projectCandidate || currentCandidate;
+  const reviewContext = asksUnconfirmedCapability
+    ? currentCandidate
+    : [currentCandidate, projectCandidate].filter(Boolean).join(" ");
   if (!candidate) return false;
-  if (isExplicitInternalReviewExclusion(combinedCandidate)) return false;
+  if (isExplicitInternalReviewExclusion(reviewContext)) return false;
   if (isConfirmedCommercialConstructionScope(candidate)) return false;
   const clearlyCommercialFacilityOrEquipment =
-    isClearlyCommercialFacilityOrEquipmentService(combinedCandidate);
+    isClearlyCommercialFacilityOrEquipmentService(reviewContext);
   if (serviceInScope === false && !clearlyCommercialFacilityOrEquipment) return false;
   return isReviewableCommercialSupportService(candidate) ||
     (asksUnconfirmedCapability && clearlyCommercialFacilityOrEquipment) ||
