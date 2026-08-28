@@ -586,6 +586,15 @@ function defaultState() {
   };
 }
 
+export function resetDraftPreservingIdentity(state) {
+  return {
+    ...defaultState(),
+    language: state?.language === "es" ? "es" : state?.language === "en" ? "en" : null,
+    customerName: formatPersonName(state?.customerName) || null,
+    companyName: normalizeText(state?.companyName, 500) || null,
+  };
+}
+
 function normalizeState(value) {
   const parsed = safeJsonParse(value, {});
   const storedPropertyType = normalizeText(parsed?.propertyType, 500);
@@ -2167,7 +2176,7 @@ export default async function handler(request, response) {
         isExplicitBookingCancellation(effectiveCurrentMessage);
 
       if (shouldCancelDraft) {
-        state = defaultState();
+        state = resetDraftPreservingIdentity(state);
         await saveState(contactId, state);
       }
 
@@ -2217,7 +2226,7 @@ export default async function handler(request, response) {
     }
 
     if (analysis.cancelBooking) {
-      state = defaultState();
+      state = resetDraftPreservingIdentity(state);
       await saveState(contactId, state);
       return response.status(200).json({
         ok: true,
