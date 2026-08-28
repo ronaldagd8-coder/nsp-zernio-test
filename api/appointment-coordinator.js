@@ -238,6 +238,17 @@ function isAddressCorrectionIntent(value) {
   return correctionLanguage && addressSignal;
 }
 
+export function extractCorrectedAddress(value) {
+  const candidate = normalizeText(value, 500)
+    .replace(
+      /^(?:(?:no[, ]+)?(?:la |the )?)?(?:direccion|dirección|address)(?:\s+(?:correcta|correct|nueva|new))?\s*(?:es|is|:)?\s*/i,
+      "",
+    )
+    .replace(/^(?:no es|is not)\b[^,.;]*[,.;]?\s*/i, "")
+    .trim();
+  return isCompleteProjectAddress(candidate) ? candidate : null;
+}
+
 function extractExplicitOnlyService(value) {
   const text = normalizeForIntent(value).replace(/[.!?]+$/g, "").trim();
   const match = /^(?:no[, ]+)?(?:mejor\s+)?(?:solo|solamente|only)\s+(?:la |el |the )?(.+)$/.exec(text);
@@ -1829,13 +1840,42 @@ export default async function handler(request, response) {
       state.stage !== "confirmed" &&
       isAddressCorrectionIntent(effectiveCurrentMessage)
     ) {
+      const correctedAddress = [
+        extractCorrectedAddress(effectiveCurrentMessage),
+        normalizeText(analysis.projectAddress, 500),
+      ].find((candidate) => isCompleteProjectAddress(candidate));
+      const correctionLanguage =
+        analysis.language === "es" ? "es" : state.language === "es" ? "es" : "en";
+
+      if (correctedAddress) {
+        state.customerName = formatPersonName(state.customerName);
+        state.projectAddress = correctedAddress;
+        state.stage = state.selectedStart ? "awaiting_confirmation" : "collecting_details";
+        state.active = true;
+        await saveState(contactId, state);
+        const correctionName = getFirstName(state);
+        const acknowledgement =
+          correctionLanguage === "es"
+            ? `Entendido${correctionName ? `, ${correctionName}` : ""}. Actualicé la dirección a ${correctedAddress}.`
+            : `Understood${correctionName ? `, ${correctionName}` : ""}. I updated the address to ${correctedAddress}.`;
+        return response.status(200).json({
+          ok: true,
+          handled: true,
+          bookingDraftPreserved: true,
+          addressCorrected: true,
+          language: correctionLanguage,
+          reply: state.selectedStart
+            ? `${acknowledgement}\n\n${confirmationReply(state, correctionLanguage)}`
+            : acknowledgement,
+          stage: state.stage,
+        });
+      }
+
       state.customerName = formatPersonName(state.customerName);
       state.projectAddress = null;
       state.stage = "collecting_details";
       state.active = true;
       await saveState(contactId, state);
-      const correctionLanguage =
-        analysis.language === "es" ? "es" : state.language === "es" ? "es" : "en";
       const correctionName = getFirstName(state);
       return response.status(200).json({
         ok: true,
