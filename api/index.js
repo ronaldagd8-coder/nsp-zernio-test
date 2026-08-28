@@ -320,8 +320,8 @@ async function createReview(body) {
   return {
     review: { ...review, ...delivery },
     customerReply: review.language === "es"
-      ? `Voy a consultar este servicio con el equipo. Te responderemos en cuanto revisemos la solicitud ${review.reference}.`
-      : `I will check this service with the team. We will respond as soon as request ${review.reference} is reviewed.`,
+      ? `Un momento, por favor. Estoy verificando este servicio con nuestro equipo y te responderé por este mismo medio tan pronto tenga la confirmación. Referencia: ${review.reference}.`
+      : `One moment, please. I'm verifying this service with our team and will reply here as soon as I receive confirmation. Reference: ${review.reference}.`,
   };
 }
 
