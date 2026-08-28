@@ -337,6 +337,7 @@ export default async function handler(
         isAudio: false,
         transcript: null,
         messageText: getMessageText(latestMessage) || null,
+        conversationId: conversationId.trim(),
       });
     }
 
@@ -461,6 +462,8 @@ export default async function handler(
       ok: true,
       isAudio: true,
       transcript,
+      messageText: transcript,
+      conversationId: conversationId.trim(),
     });
   } catch (error) {
     console.error(
