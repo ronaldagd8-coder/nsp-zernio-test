@@ -998,6 +998,33 @@ async function getContact(contactId) {
   return data?.contact ?? data;
 }
 
+export function getContactGreetingName(contact) {
+  const structuredName = [contact?.firstName, contact?.lastName]
+    .map((value) => normalizeText(value, 120))
+    .filter(Boolean)
+    .join(" ");
+  const candidates = [
+    structuredName,
+    contact?.name,
+    contact?.fullName,
+    contact?.displayName,
+    contact?.profileName,
+    contact?.profile?.name,
+    contact?.metadata?.name,
+  ];
+
+  for (const candidate of candidates) {
+    const name = formatPersonName(candidate);
+    const normalized = normalizeForIntent(name);
+    if (!name || name.includes("@")) continue;
+    if (/^\+?[\d\s().-]{7,30}$/.test(name)) continue;
+    if (/^(unknown|desconocido|whatsapp user|usuario de whatsapp)$/.test(normalized)) continue;
+    return name.split(/\s+/)[0] || "";
+  }
+
+  return "";
+}
+
 function getCustomFields(contact) {
   return contact?.customFields ?? contact?.metadata?.customFields ?? {};
 }
@@ -1637,6 +1664,7 @@ export default async function handler(request, response) {
 
     const customFields = getCustomFields(contact);
     let state = normalizeState(customFields?.[BOOKING_FIELD_NAME]);
+    const contactGreetingName = getContactGreetingName(contact);
     let analysis = await analyzeMessage({
       currentMessage: effectiveCurrentMessage,
       history,
@@ -2044,10 +2072,8 @@ export default async function handler(request, response) {
       });
     }
 
-    if (
-      isGreetingOnlyMessage(effectiveCurrentMessage) &&
-      getFirstName(state)
-    ) {
+    const greetingName = getFirstName(state) || contactGreetingName;
+    if (isGreetingOnlyMessage(effectiveCurrentMessage) && greetingName) {
       const greetingLanguage =
         analysis.language === "es" ? "es" : state.language === "es" ? "es" : "en";
       return response.status(200).json({
@@ -2055,7 +2081,7 @@ export default async function handler(request, response) {
         handled: true,
         language: greetingLanguage,
         reply: returningCustomerGreeting(
-          state,
+          { ...state, customerName: greetingName },
           greetingLanguage,
           effectiveCurrentMessage,
         ),
