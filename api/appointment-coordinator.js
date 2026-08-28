@@ -523,7 +523,7 @@ function isExplicitInternalReviewExclusion(value) {
   if (isClearlyOutOfScopeService(text) || isResidentialPropertyMessage(text)) return true;
   return /\b(landscaping|landscape|jardineria|paisajismo|software development|desarrollo de software|digital marketing|marketing digital|seo|sem|social media management|manejo de redes sociales|preparar impuestos|preparacion de impuestos|tax preparation|bookkeeping|contabilidad)\b/.test(
     text,
-  ) || /\b(pagina web|sitio web|web page|website|web site|desarrollo web|web development)\b/.test(text);
+  ) || /\b(paginas? web|sitios? web|web pages?|websites?|web sites?|desarrollo web|web development)\b/.test(text);
 }
 
 function isClearlyCommercialFacilityOrEquipmentService(value) {
@@ -561,13 +561,22 @@ export function requiresInternalServiceReview({
   const reviewContext = asksUnconfirmedCapability
     ? currentCandidate
     : [currentCandidate, projectCandidate].filter(Boolean).join(" ");
+  const explicitlyCommercialQuestion = asksUnconfirmedCapability &&
+    /\b(comercial|comerciales|commercial|industrial|industriales|facility|facilities|instalacion|instalaciones|edificio|edificios|building|buildings|oficina|office|restaurante|restaurant|tienda|store|warehouse|almacen|bodega)\b/.test(
+      messageIntent,
+    );
   if (!candidate) return false;
   if (isExplicitInternalReviewExclusion(reviewContext)) return false;
   if (isConfirmedCommercialConstructionScope(candidate)) return false;
   const clearlyCommercialFacilityOrEquipment =
     isClearlyCommercialFacilityOrEquipmentService(reviewContext);
-  if (serviceInScope === false && !clearlyCommercialFacilityOrEquipment) return false;
+  if (
+    serviceInScope === false &&
+    !clearlyCommercialFacilityOrEquipment &&
+    !explicitlyCommercialQuestion
+  ) return false;
   return isReviewableCommercialSupportService(candidate) ||
+    explicitlyCommercialQuestion ||
     (asksUnconfirmedCapability && clearlyCommercialFacilityOrEquipment) ||
     (bookingRelated === true && Boolean(normalizeText(projectScope, 500)));
 }
