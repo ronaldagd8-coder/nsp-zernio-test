@@ -81,6 +81,21 @@ function projectScopeSupportedByCurrentMessage(scope, currentMessage) {
   return scopeStems.some((stem) => messageStems.has(stem));
 }
 
+export function cleanInternalReviewService(value) {
+  const service = normalizeText(value, 500)
+    .replace(/^[¿?¡!\s]+|[¿?¡!\s]+$/g, "")
+    .replace(
+      /^(?:hola[,.]?\s*)?(?:quiero saber si\s+)?(?:ustedes\s+)?(?:también\s+|tambien\s+|además\s+|ademas\s+)?(?:hacen|ofrecen|realizan|trabajan con|atienden|pueden realizar|pueden hacer)\s+/i,
+      "",
+    )
+    .replace(
+      /^(?:hello[,.]?\s*)?(?:i want to know if\s+)?(?:do you|can you|does your (?:team|company))\s+(?:also\s+)?(?:offer|provide|perform|handle|work with|service|maintain|repair|inspect|install)\s+/i,
+      "",
+    )
+    .trim();
+  return service || normalizeText(value, 500);
+}
+
 export function selectInternalReviewService(projectScope, currentMessage) {
   const analyzedScope = normalizeText(projectScope, 500);
   const currentScope = normalizeText(currentMessage, 500);
@@ -99,7 +114,7 @@ export function selectInternalReviewService(projectScope, currentMessage) {
     .some((stem) => currentStems.has(stem));
   return analyzedScope && analyzedScopeMatchesCurrentMessage
     ? analyzedScope
-    : currentScope || analyzedScope;
+    : cleanInternalReviewService(currentScope) || analyzedScope;
 }
 
 function isSiteAccessQuestion(value) {
