@@ -211,50 +211,45 @@ export function customerDecisionReply({ decision, language, service }) {
     : `To help the team review ${service}, can you provide more information about the work, the equipment involved, and the result you need?`;
 }
 
-async function createTemplateBroadcast({ reviewerContactId, review }) {
-  const connection = await resolveWhatsAppConnection();
-  const values = reviewTemplateVariables(review);
-  const variableMapping = Object.fromEntries(values.map((value, index) => [
-    String(index + 1),
-    { field: "custom", customValue: value },
-  ]));
-  const parameters = values.map((_, index) => ({ type: "text", text: `{{${index + 1}}}` }));
-  const response = await zernioFetch("/broadcasts", {
+export function internalReviewTemplatePayload({ accountId, reviewerPhone, templateName, review }) {
+  const phone = normalizePhone(reviewerPhone);
+  if (!phone) throw new Error("Internal reviewer phone is required");
+  return {
+    accountId,
+    participantId: `+${phone}`,
+    templateName,
+    templateLanguage: "es",
+    templateParams: reviewTemplateVariables(review),
+  };
+}
+
+async function sendInternalReviewTemplate({ review }) {
+  const { accountId } = await resolveWhatsAppConnection();
+  const body = internalReviewTemplatePayload({
+    accountId,
+    reviewerPhone: process.env.INTERNAL_SERVICE_REVIEW_PHONE,
+    templateName: process.env.INTERNAL_SERVICE_REVIEW_TEMPLATE || "internal_service_review_es",
+    review,
+  });
+  const response = await zernioFetch("/inbox/conversations", {
     method: "POST",
-    body: JSON.stringify({
-      profileId: connection.profileId,
-      accountId: connection.accountId,
-      platform: "whatsapp",
-      name: `NSP internal service review — ${review.reference}`,
-      template: {
-        name: process.env.INTERNAL_SERVICE_REVIEW_TEMPLATE || "internal_service_review_es",
-        language: "es",
-        components: [{ type: "body", parameters }],
-        variableMapping,
-      },
-    }),
+    headers: {
+      "Idempotency-Key": createHash("sha256")
+        .update(`internal-review-template|${review.reference}`)
+        .digest("hex"),
+    },
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Internal review broadcast failed: ${response.status} ${body.slice(0, 400)}`);
+    const responseBody = await response.text();
+    throw new Error(`Internal review template failed: ${response.status} ${responseBody.slice(0, 400)}`);
   }
   const payload = await response.json();
-  const broadcastId = payload?.broadcast?.id ?? payload?.data?.broadcast?.id;
-  if (!broadcastId) throw new Error("Zernio did not return a broadcast ID");
-
-  const recipientResponse = await zernioFetch(
-    `/broadcasts/${encodeURIComponent(broadcastId)}/recipients`,
-    { method: "POST", body: JSON.stringify({ contactIds: [reviewerContactId] }) },
-  );
-  if (!recipientResponse.ok) throw new Error(`Review recipient failed: ${recipientResponse.status}`);
-
-  const scheduledAt = new Date(Date.now() + 15_000).toISOString();
-  const scheduleResponse = await zernioFetch(
-    `/broadcasts/${encodeURIComponent(broadcastId)}/schedule`,
-    { method: "POST", body: JSON.stringify({ scheduledAt }) },
-  );
-  if (!scheduleResponse.ok) throw new Error(`Review schedule failed: ${scheduleResponse.status}`);
-  return { broadcastId, scheduledAt };
+  return {
+    deliveryConversationId:
+      payload?.conversation?.id ?? payload?.data?.conversation?.id ?? null,
+    sentAt: new Date().toISOString(),
+  };
 }
 
 async function sendConversationMessage({ conversationId, message, idempotencySource }) {
@@ -316,7 +311,7 @@ async function createReview(body) {
   const nextQueue = [...(Array.isArray(queue) ? queue : []), review].slice(-20);
   await saveContactField(reviewerContactId, REVIEW_FIELD_NAME, nextQueue);
   await saveContactField(customerContactId, CUSTOMER_REVIEW_FIELD_NAME, review);
-  const delivery = await createTemplateBroadcast({ reviewerContactId, review });
+  const delivery = await sendInternalReviewTemplate({ review });
   return {
     review: { ...review, ...delivery },
     customerReply: review.language === "es"
