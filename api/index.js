@@ -218,6 +218,26 @@ export function customerDecisionReply({ decision, language, service }) {
     : `To help the team properly evaluate the request involving ${service}, can you provide more information about the work, the equipment involved, and the result you need?`;
 }
 
+function internalReviewGreeting(language, customerName) {
+  const normalizedName = normalizeText(customerName, 200);
+  const firstName = normalizedName
+    .split(/\s+/)[0]
+    ?.replace(/^[^\p{L}'’-]+|[^\p{L}'’-]+$/gu, "") ?? "";
+  const usableName = firstName &&
+    !/^(cliente|customer|desconocido|unknown|n\/a)$/i.test(firstName)
+    ? firstName
+    : "";
+  if (!usableName) return "";
+  return language === "es" ? `Hola, ${usableName}. ` : `Hello, ${usableName}. `;
+}
+
+export function internalReviewAcknowledgement({ language, customerName, reference }) {
+  const greeting = internalReviewGreeting(language, customerName);
+  return language === "es"
+    ? `${greeting}Un momento, por favor. Estoy verificando este servicio con nuestro equipo y te responderé por este mismo medio tan pronto tenga la confirmación. Referencia: ${reference}.`
+    : `${greeting}One moment, please. I'm verifying this service with our team and will reply here as soon as I receive confirmation. Reference: ${reference}.`;
+}
+
 export function internalReviewTemplatePayload({ accountId, reviewerPhone, templateName, review }) {
   const phone = normalizePhone(reviewerPhone);
   if (!phone) throw new Error("Internal reviewer phone is required");
@@ -331,9 +351,11 @@ async function createReview(body) {
   await saveContactField(customerContactId, CUSTOMER_REVIEW_FIELD_NAME, deliveredReview);
   return {
     review: deliveredReview,
-    customerReply: review.language === "es"
-      ? `Un momento, por favor. Estoy verificando este servicio con nuestro equipo y te responderé por este mismo medio tan pronto tenga la confirmación. Referencia: ${review.reference}.`
-      : `One moment, please. I'm verifying this service with our team and will reply here as soon as I receive confirmation. Reference: ${review.reference}.`,
+    customerReply: internalReviewAcknowledgement({
+      language: review.language,
+      customerName: review.customerName,
+      reference: review.reference,
+    }),
   };
 }
 
