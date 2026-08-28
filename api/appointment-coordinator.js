@@ -481,6 +481,23 @@ function isReviewableCommercialSupportService(value) {
     /\b(campana|campanas|hood|hoods|cocina industrial|cocinas industriales|commercial kitchen|commercial kitchens|kitchen exhaust|extractor de cocina|extractores de cocina)\b/.test(text);
 }
 
+function isExplicitInternalReviewExclusion(value) {
+  const text = normalizeForIntent(value);
+  if (!text) return false;
+  if (isClearlyOutOfScopeService(text) || isResidentialPropertyMessage(text)) return true;
+  return /\b(landscaping|landscape|jardineria|paisajismo|software development|desarrollo de software|digital marketing|marketing digital|seo|sem|social media management|manejo de redes sociales|preparar impuestos|preparacion de impuestos|tax preparation|bookkeeping|contabilidad)\b/.test(
+    text,
+  ) || /\b(pagina web|sitio web|web page|website|web site|desarrollo web|web development)\b/.test(text);
+}
+
+function isClearlyCommercialFacilityOrEquipmentService(value) {
+  const text = normalizeForIntent(value);
+  if (!text) return false;
+  const commercialContext = /\b(comercial|comerciales|commercial|industrial|industriales|facility|facilities|instalacion|instalaciones|edificio|edificios|building|buildings|oficina|office|restaurante|restaurant|tienda|store|warehouse|almacen|bodega)\b/.test(text);
+  const facilityOrEquipment = /\b(elevador|elevadores|elevator|elevators|ascensor|ascensores|lift|lifts|equipo|equipos|equipment|maquinaria|machinery|generador|generadores|generator|generators|extractor|extractores|exhaust|campana|campanas|hood|hoods|sistema|sistemas|system|systems|instalacion|instalaciones|facility|facilities|edificio|edificios|building|buildings)\b/.test(text);
+  return commercialContext && facilityOrEquipment;
+}
+
 function isConfirmedCommercialConstructionScope(value) {
   const text = normalizeForIntent(value);
   if (!text) return false;
@@ -497,15 +514,19 @@ export function requiresInternalServiceReview({
   bookingRelated,
 }) {
   const candidate = normalizeText(projectScope, 500) || normalizeText(currentMessage, 500);
+  const combinedCandidate = [currentMessage, projectScope].filter(Boolean).join(" ");
   const messageIntent = normalizeForIntent(currentMessage);
   const asksUnconfirmedCapability = isServiceCapabilityQuestion(currentMessage) ||
     (/\?\s*$/.test(normalizeText(currentMessage, 500)) &&
       /\b(hacen|ofrecen|realizan|revisan|instalan|reparan|mantienen|atienden|do you|can you|provide|service|inspect|install|repair|maintain)\b/.test(messageIntent));
-  if (!candidate || serviceInScope === false) return false;
-  if (isClearlyOutOfScopeService(candidate)) return false;
+  if (!candidate) return false;
+  if (isExplicitInternalReviewExclusion(combinedCandidate)) return false;
   if (isConfirmedCommercialConstructionScope(candidate)) return false;
+  const clearlyCommercialFacilityOrEquipment =
+    isClearlyCommercialFacilityOrEquipmentService(combinedCandidate);
+  if (serviceInScope === false && !clearlyCommercialFacilityOrEquipment) return false;
   return isReviewableCommercialSupportService(candidate) ||
-    asksUnconfirmedCapability ||
+    (asksUnconfirmedCapability && clearlyCommercialFacilityOrEquipment) ||
     (bookingRelated === true && Boolean(normalizeText(projectScope, 500)));
 }
 
