@@ -391,6 +391,7 @@ async function resolveReview(body) {
     ...review,
     status: decision === "request_information" ? "awaiting_customer_details" : "resolved",
     decision,
+    awaitingVisitConfirmation: decision === "evaluate",
     resolvedAt: new Date().toISOString(),
   };
   const nextQueue = queue.slice();
