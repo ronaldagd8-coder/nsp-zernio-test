@@ -177,10 +177,22 @@ export function reviewTemplateVariables(review) {
 
 export function normalizeReviewDecision(value) {
   const text = normalizeText(String(value ?? ""), 100).toLowerCase();
-  if (/^(1|sí,? evaluar|si,? evaluar|sí evaluar|si evaluar)$/.test(text)) return "evaluate";
-  if (/^(2|no ofrecemos)$/.test(text)) return "not_offered";
-  if (/^(3|pedir información|pedir informacion)$/.test(text)) return "request_information";
+  if (/^(1(?:[\s.):-]+(?:sí|si)(?:,?\s*evaluar)?)?|sí,? evaluar|si,? evaluar|sí evaluar|si evaluar)$/.test(text)) return "evaluate";
+  if (/^(2(?:[\s.):-]+no ofrecemos)?|no ofrecemos)$/.test(text)) return "not_offered";
+  if (/^(3(?:[\s.):-]+pedir informaci[oó]n)?|pedir información|pedir informacion)$/.test(text)) return "request_information";
   return null;
+}
+
+export function pendingReviewIndex(queue, reference = "") {
+  if (!Array.isArray(queue)) return -1;
+  const normalizedReference = normalizeText(reference, 100).toUpperCase();
+  if (normalizedReference) {
+    return queue.findIndex((item) => item?.reference === normalizedReference);
+  }
+  for (let index = queue.length - 1; index >= 0; index -= 1) {
+    if (queue[index]?.status === "pending_internal_review") return index;
+  }
+  return -1;
 }
 
 export function customerDecisionReply({ decision, language, service }) {
@@ -269,6 +281,23 @@ async function createReview(body) {
   const reviewerContact = await getContact(process.env.INTERNAL_SERVICE_REVIEW_PHONE);
   const reviewerContactId = contactId(reviewerContact);
   const queue = safeJsonParse(customFields(reviewerContact)?.[REVIEW_FIELD_NAME], []);
+  const pendingEquivalent = Array.isArray(queue)
+    ? [...queue].reverse().find((item) =>
+      item?.status === "pending_internal_review" &&
+      item?.customerContactId === customerContactId &&
+      normalizeText(item?.service, 500).toLowerCase() ===
+        normalizeText(body.service, 500).toLowerCase()
+    )
+    : null;
+  if (pendingEquivalent) {
+    return {
+      review: pendingEquivalent,
+      alreadyPending: true,
+      customerReply: pendingEquivalent.language === "es"
+        ? `Este servicio ya está pendiente de revisión con el equipo bajo la solicitud ${pendingEquivalent.reference}. Te responderemos en cuanto tengamos una decisión.`
+        : `This service is already pending team review under request ${pendingEquivalent.reference}. We will respond as soon as a decision is available.`,
+    };
+  }
   const review = {
     reference: createReviewReference(),
     customerContactId,
@@ -306,10 +335,8 @@ async function resolveReview(body) {
   const queue = safeJsonParse(customFields(reviewerContact)?.[REVIEW_FIELD_NAME], []);
   const reference = normalizeText(body.reference, 100).toUpperCase();
   const decision = normalizeReviewDecision(body.decision);
-  if (!reference || !decision) throw new Error("A valid reference and decision are required");
-  const index = Array.isArray(queue)
-    ? queue.findIndex((item) => item?.reference === reference)
-    : -1;
+  if (!decision) throw new Error("A valid review decision is required");
+  const index = pendingReviewIndex(queue, reference);
   if (index < 0) throw new Error("The service review reference was not found");
   const review = queue[index];
   if (review.status !== "pending_internal_review") {
