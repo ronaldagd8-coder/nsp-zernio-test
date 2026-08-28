@@ -826,6 +826,15 @@ function extractContactIdentifier(body) {
   );
 }
 
+function extractSuppliedPhone(body) {
+  return normalizePhoneForDisplay(
+    body?.phone ??
+      body?.contact?.phone ??
+      body?.variables?.phone ??
+      body?.vars?.phone,
+  );
+}
+
 function extractConversationId(body) {
   return normalizeText(
     body?.conversationId ??
@@ -1762,6 +1771,7 @@ export default async function handler(request, response) {
   }
 
   const suppliedContactIdentifier = extractContactIdentifier(request.body);
+  const suppliedPhone = extractSuppliedPhone(request.body);
   const conversationId = extractConversationId(request.body);
   const suppliedCurrentMessage = extractCurrentMessage(request.body);
 
@@ -2640,7 +2650,8 @@ export default async function handler(request, response) {
         selectedStart: state.selectedStart,
         contactIdentifier: contactId,
         conversationId,
-        whatsappNumber: getContactPhone(contact, contactCandidates),
+        whatsappNumber:
+          suppliedPhone || getContactPhone(contact, contactCandidates),
         email: state.email,
         language,
       });
