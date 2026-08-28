@@ -183,16 +183,23 @@ export function normalizeReviewDecision(value) {
   return null;
 }
 
-export function pendingReviewIndex(queue, reference = "") {
+export function pendingReviewIndex(queue, reference = "", quotedMessageId = "") {
   if (!Array.isArray(queue)) return -1;
   const normalizedReference = normalizeText(reference, 100).toUpperCase();
   if (normalizedReference) {
     return queue.findIndex((item) => item?.reference === normalizedReference);
   }
-  for (let index = queue.length - 1; index >= 0; index -= 1) {
-    if (queue[index]?.status === "pending_internal_review") return index;
+  const normalizedMessageId = normalizeText(quotedMessageId, 500);
+  if (normalizedMessageId) {
+    return queue.findIndex((item) =>
+      item?.status === "pending_internal_review" &&
+      normalizeText(item?.deliveryMessageId, 500) === normalizedMessageId
+    );
   }
-  return -1;
+  const pendingIndexes = queue
+    .map((item, index) => item?.status === "pending_internal_review" ? index : -1)
+    .filter((index) => index >= 0);
+  return pendingIndexes.length === 1 ? pendingIndexes[0] : -1;
 }
 
 export function customerDecisionReply({ decision, language, service }) {
@@ -246,8 +253,13 @@ async function sendInternalReviewTemplate({ review }) {
   }
   const payload = await response.json();
   return {
+    deliveryMessageId:
+      payload?.data?.messageId ?? payload?.message?.platformMessageId ?? null,
     deliveryConversationId:
-      payload?.conversation?.id ?? payload?.data?.conversation?.id ?? null,
+      payload?.data?.conversationId ??
+      payload?.conversation?.id ??
+      payload?.data?.conversation?.id ??
+      null,
     sentAt: new Date().toISOString(),
   };
 }
@@ -312,8 +324,13 @@ async function createReview(body) {
   await saveContactField(reviewerContactId, REVIEW_FIELD_NAME, nextQueue);
   await saveContactField(customerContactId, CUSTOMER_REVIEW_FIELD_NAME, review);
   const delivery = await sendInternalReviewTemplate({ review });
+  const deliveredReview = { ...review, ...delivery };
+  const deliveredQueue = nextQueue.slice();
+  deliveredQueue[deliveredQueue.length - 1] = deliveredReview;
+  await saveContactField(reviewerContactId, REVIEW_FIELD_NAME, deliveredQueue);
+  await saveContactField(customerContactId, CUSTOMER_REVIEW_FIELD_NAME, deliveredReview);
   return {
-    review: { ...review, ...delivery },
+    review: deliveredReview,
     customerReply: review.language === "es"
       ? `Un momento, por favor. Estoy verificando este servicio con nuestro equipo y te responderé por este mismo medio tan pronto tenga la confirmación. Referencia: ${review.reference}.`
       : `One moment, please. I'm verifying this service with our team and will reply here as soon as I receive confirmation. Reference: ${review.reference}.`,
@@ -329,9 +346,10 @@ async function resolveReview(body) {
   }
   const queue = safeJsonParse(customFields(reviewerContact)?.[REVIEW_FIELD_NAME], []);
   const reference = normalizeText(body.reference, 100).toUpperCase();
+  const quotedMessageId = normalizeText(body.quotedMessageId, 500);
   const decision = normalizeReviewDecision(body.decision);
   if (!decision) throw new Error("A valid review decision is required");
-  const index = pendingReviewIndex(queue, reference);
+  const index = pendingReviewIndex(queue, reference, quotedMessageId);
   if (index < 0) throw new Error("The service review reference was not found");
   const review = queue[index];
   if (review.status !== "pending_internal_review") {
