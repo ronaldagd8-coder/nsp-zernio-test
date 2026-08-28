@@ -39,6 +39,43 @@ function extractMessages(data) {
   );
 }
 
+function normalizeMessageCandidate(value, depth = 0) {
+  if (typeof value === "string") {
+    return value.trim().slice(0, 1500);
+  }
+
+  if (!value || typeof value !== "object" || depth > 7) {
+    return "";
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 10)) {
+      const normalized = normalizeMessageCandidate(item, depth + 1);
+      if (normalized) return normalized;
+    }
+    return "";
+  }
+
+  const candidateKeys = [
+    "body",
+    "text",
+    "content",
+    "caption",
+    "messageText",
+    "message",
+    "payload",
+    "data",
+  ];
+
+  for (const key of candidateKeys) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    const normalized = normalizeMessageCandidate(value[key], depth + 1);
+    if (normalized) return normalized;
+  }
+
+  return "";
+}
+
 function getMessageText(message) {
   const candidates = [
     message?.body,
@@ -55,13 +92,11 @@ function getMessageText(message) {
   ];
 
   for (const candidate of candidates) {
-    const normalized = typeof candidate === "string"
-      ? candidate.trim().slice(0, 1500)
-      : "";
+    const normalized = normalizeMessageCandidate(candidate);
     if (normalized) return normalized;
   }
 
-  return "";
+  return normalizeMessageCandidate(message);
 }
 
 function extractAccounts(data) {
