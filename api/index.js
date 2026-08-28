@@ -214,8 +214,8 @@ export function customerDecisionReply({ decision, language, service }) {
       : `Thank you for checking with us. The team confirmed that we do not currently offer ${service}. If you need help with another commercial construction or remodeling project, I can assist you.`;
   }
   return language === "es"
-    ? `Para que el equipo pueda revisar ${service}, ¿puedes contarme un poco más sobre el trabajo, el equipo involucrado y el resultado que necesitas?`
-    : `To help the team review ${service}, can you provide more information about the work, the equipment involved, and the result you need?`;
+    ? `Para que el equipo pueda evaluar correctamente la solicitud relacionada con ${service}, ¿puedes contarme un poco más sobre el trabajo, el equipo involucrado y el resultado que necesitas?`
+    : `To help the team properly evaluate the request involving ${service}, can you provide more information about the work, the equipment involved, and the result you need?`;
 }
 
 export function internalReviewTemplatePayload({ accountId, reviewerPhone, templateName, review }) {
