@@ -327,6 +327,11 @@ function inferPropertyTypeFromMessage(value, language) {
   return matched ? matched[1][language === "es" ? 0 : 1] : null;
 }
 
+export function isAffirmativeCommercialPropertyReply(value, inferredPropertyType) {
+  return Boolean(inferredPropertyType) &&
+    /^(si|yes)\b/.test(normalizeForIntent(value));
+}
+
 function normalizeProjectScope(value, propertyType) {
   let scope = normalizeText(value, 2000);
   if (!scope) return "";
@@ -1601,9 +1606,13 @@ export default async function handler(request, response) {
     if (!isSpecificPropertyType(analysis.propertyType) && inferredPropertyType) {
       analysis.propertyType = inferredPropertyType;
     }
+    const affirmativeCommercialPropertyReply =
+      isAffirmativeCommercialPropertyReply(
+        effectiveCurrentMessage,
+        inferredPropertyType,
+      );
     const continuesWebsiteProjectRedirect =
-      Boolean(inferredPropertyType) &&
-      /^(si|sí|yes)\b/i.test(normalizeText(effectiveCurrentMessage, 500)) &&
+      affirmativeCommercialPropertyReply &&
       (hasActiveWebsiteProjectFollowUp(state) ||
         recentHistoryHasWebsiteProjectRedirect(history));
     if (continuesWebsiteProjectRedirect) {
@@ -1750,6 +1759,38 @@ export default async function handler(request, response) {
           companyName: state.companyName,
         },
         analysis,
+      );
+      await saveState(contactId, nextState);
+      const firstName = getFirstName(nextState);
+      const propertyType = normalizeText(nextState.propertyType, 120);
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        language: detectedLanguage,
+        reply:
+          detectedLanguage === "es"
+            ? `Perfecto${firstName ? `, ${firstName}` : ""}. ¿Qué trabajo necesitas realizar${propertyType.toLowerCase() === "oficina" ? " en la oficina" : ` en la propiedad (${propertyType})`}?`
+            : `Perfect${firstName ? `, ${firstName}` : ""}. What work do you need at the ${propertyType}?`,
+        stage: nextState.stage,
+      });
+    }
+
+    if (
+      state.stage === "idle" &&
+      affirmativeCommercialPropertyReply &&
+      !analysis.changeOrCancelExisting &&
+      !analysis.existingBookingQuestion
+    ) {
+      const nextState = applyUpdates(
+        {
+          ...defaultState(),
+          active: true,
+          stage: "collecting_details",
+          language: detectedLanguage,
+          customerName: state.customerName,
+          companyName: state.companyName,
+        },
+        { ...analysis, projectScope: null },
       );
       await saveState(contactId, nextState);
       const firstName = getFirstName(nextState);
