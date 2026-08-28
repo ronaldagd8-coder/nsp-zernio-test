@@ -571,6 +571,7 @@ selectedOption must be 1, 2, or 3 only when the customer clearly chooses one of 
 explicitConfirmation is true only when the assistant previously presented a booking summary and the customer clearly approves it.
 cancelBooking is true only when the customer clearly cancels or stops the scheduling process.
 changeOrCancelExisting is true if the customer wants to change or cancel a request already submitted for team approval.
+newCommercialProject is true when the CURRENT message starts or continues discussing commercial work that is separate from an already confirmed appointment. This includes a direct answer to the assistant asking whether the customer has another commercial construction or remodeling need. Do not mark a message as a change to the confirmed appointment unless the customer explicitly refers to changing, correcting, rescheduling, or cancelling that appointment. A short reply such as "Yes, in an office" after the assistant asks whether there is commercial work it can help with is a new-project conversation, not an appointment modification. If the customer only acknowledges that another project exists but has not requested a site visit, bookingRelated must remain false.
 separateProjectQuestion is true when the CURRENT message asks a company, service, construction, property, or project question that is separate from answering the pending scheduling question. A booking state being active does not by itself make a separate project question booking-related.
 
 Required JSON keys:
@@ -580,6 +581,7 @@ Required JSON keys:
   "language": "es" | "en",
   "cancelBooking": boolean,
   "changeOrCancelExisting": boolean,
+  "newCommercialProject": boolean,
   "separateProjectQuestion": boolean,
   "explicitConfirmation": boolean,
   "selectedOption": number | null,
@@ -1030,27 +1032,51 @@ export default async function handler(request, response) {
         });
       }
 
-      if (!analysis.bookingRelated && !analysis.changeOrCancelExisting) {
+      if (analysis.newCommercialProject === true) {
+        const previousCustomerName = state.customerName;
+        const previousCompanyName = state.companyName;
+        state = applyUpdates(
+          {
+            ...defaultState(),
+            customerName: previousCustomerName,
+            companyName: previousCompanyName,
+            language: confirmedLanguage,
+          },
+          analysis,
+        );
+        state.active = analysis.bookingRelated === true;
+        await saveState(contactId, state);
+
+        if (!analysis.bookingRelated) {
+          return response.status(200).json({
+            ok: true,
+            handled: false,
+            newCommercialProject: true,
+            previousConfirmedAppointmentPreserved: true,
+            stage: state.stage,
+          });
+        }
+      } else {
+        if (!analysis.bookingRelated && !analysis.changeOrCancelExisting) {
+          return response.status(200).json({
+            ok: true,
+            handled: false,
+            stage: state.stage,
+          });
+        }
+
         return response.status(200).json({
           ok: true,
-          handled: false,
+          handled: true,
+          handoffRequired: true,
+          language: confirmedLanguage,
+          reply:
+            confirmedLanguage === "es"
+              ? `Entiendo${getFirstName(state) ? `, ${getFirstName(state)}` : ""}. Tu visita ya está confirmada. Un miembro del equipo te ayudará personalmente a corregirla, cambiarla o cancelarla.`
+              : `I understand${getFirstName(state) ? `, ${getFirstName(state)}` : ""}. Your site visit is already confirmed. A team member will personally help you correct, change, or cancel it.`,
           stage: state.stage,
         });
       }
-
-      const confirmedFirstName = getFirstName(state);
-
-      return response.status(200).json({
-        ok: true,
-        handled: true,
-        handoffRequired: true,
-        language: confirmedLanguage,
-        reply:
-          confirmedLanguage === "es"
-            ? `Entiendo${confirmedFirstName ? `, ${confirmedFirstName}` : ""}. Tu visita ya está confirmada. Un miembro del equipo te ayudará personalmente a corregirla, cambiarla o cancelarla.`
-            : `I understand${confirmedFirstName ? `, ${confirmedFirstName}` : ""}. Your site visit is already confirmed. A team member will personally help you correct, change, or cancel it.`,
-        stage: state.stage,
-      });
     }
 
     if (!analysis.bookingRelated && state.stage === "pending_approval") {
