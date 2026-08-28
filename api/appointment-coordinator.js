@@ -112,7 +112,7 @@ function siteAccessReply(language) {
     : "For an evaluation visit, an authorized person must be present to provide access unless the team has approved another arrangement in writing beforehand. NEXT SOLUTIONS PARTNERS will not enter the property without express authorization.";
 }
 
-function isDirectConfirmation(value) {
+export function isDirectConfirmation(value) {
   const text = normalizeForIntent(value);
   if (!text || text.length > 120) return false;
 
@@ -2156,6 +2156,7 @@ export default async function handler(request, response) {
 
     if (
       state.stage === "awaiting_confirmation" &&
+      !isDirectConfirmation(effectiveCurrentMessage) &&
       !explicitOnlyService &&
       !explicitIncludedService &&
       (analysis.separateProjectQuestion === true ||
