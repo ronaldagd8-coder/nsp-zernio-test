@@ -81,6 +81,27 @@ function projectScopeSupportedByCurrentMessage(scope, currentMessage) {
   return scopeStems.some((stem) => messageStems.has(stem));
 }
 
+export function selectInternalReviewService(projectScope, currentMessage) {
+  const analyzedScope = normalizeText(projectScope, 500);
+  const currentScope = normalizeText(currentMessage, 500);
+  const genericTerms = new Set([
+    "comercial", "comerciales", "commercial", "servicio", "service",
+    "mantenimiento", "maintenance", "remodelacion", "remodeling",
+    "realizan", "realizar", "ofrecen", "ustedes", "provide", "handle",
+  ]);
+  const distinctiveStems = (value) =>
+    normalizeForIntent(value)
+      .split(/[^a-z0-9]+/)
+      .filter((token) => token.length >= 4 && !genericTerms.has(token))
+      .map((token) => token.slice(0, 5));
+  const currentStems = new Set(distinctiveStems(currentScope));
+  const analyzedScopeMatchesCurrentMessage = distinctiveStems(analyzedScope)
+    .some((stem) => currentStems.has(stem));
+  return analyzedScope && analyzedScopeMatchesCurrentMessage
+    ? analyzedScope
+    : currentScope || analyzedScope;
+}
+
 function isSiteAccessQuestion(value) {
   const text = normalizeForIntent(value);
   if (!text || text.length > 1000) return false;
@@ -1991,8 +2012,10 @@ export default async function handler(request, response) {
     }
 
     if (internalReviewRequired) {
-      const reviewService = normalizeText(analysis.projectScope, 500) ||
-        normalizeText(effectiveCurrentMessage, 500);
+      const reviewService = selectInternalReviewService(
+        analysis.projectScope,
+        effectiveCurrentMessage,
+      );
       const reviewPropertyType = normalizeText(
         analysis.propertyType ?? state.propertyType,
         200,
