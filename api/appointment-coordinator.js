@@ -773,6 +773,7 @@ function extractCurrentMessage(body) {
 
   return normalizeText(
     body?.messageText ??
+      body?.intent ??
       body?.message?.body ??
       body?.message?.text ??
       body?.event?.message?.body ??
