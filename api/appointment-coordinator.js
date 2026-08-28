@@ -488,6 +488,19 @@ export function getWebsiteReferralReply(language, firstName = "") {
     : `Thank you${name ? `, ${name},` : ""} for reaching out through our website. How can NEXT SOLUTIONS PARTNERS assist you with your commercial project?`;
 }
 
+export function recentHistoryHasWebsiteProjectRedirect(history) {
+  const recent = normalizeForIntent(
+    Array.isArray(history) ? history.slice(-6).join("\n") : "",
+  );
+  return (
+    /no ofrecemos desarrollo de paginas web/.test(recent) &&
+    /trabajo comercial de construccion o remodelacion/.test(recent)
+  ) || (
+    /do not provide website development/.test(recent) &&
+    /commercial construction or remodeling project/.test(recent)
+  );
+}
+
 function getWebsiteDevelopmentReply(language) {
   return language === "es"
     ? "Gracias por consultarnos. NEXT SOLUTIONS PARTNERS se especializa en construcción, remodelación y reparaciones de propiedades comerciales, por lo que no ofrecemos desarrollo de páginas web."
@@ -1580,6 +1593,13 @@ export default async function handler(request, response) {
     if (!isSpecificPropertyType(analysis.propertyType) && inferredPropertyType) {
       analysis.propertyType = inferredPropertyType;
     }
+    const continuesWebsiteProjectRedirect =
+      Boolean(inferredPropertyType) &&
+      /^(si|sí|yes)\b/i.test(normalizeText(effectiveCurrentMessage, 500)) &&
+      recentHistoryHasWebsiteProjectRedirect(history);
+    if (continuesWebsiteProjectRedirect) {
+      analysis.newCommercialProject = true;
+    }
     if (
       state.stage === "confirmed" &&
       !analysis.changeOrCancelExisting &&
@@ -1700,6 +1720,37 @@ export default async function handler(request, response) {
             ? `${getWebsiteDevelopmentReply(detectedLanguage)} ¿Hay algún trabajo comercial de construcción o remodelación en el que podamos ayudarte?`
             : `${getWebsiteDevelopmentReply(detectedLanguage)} Is there a commercial construction or remodeling project we can help you with?`,
         stage: state.stage,
+      });
+    }
+
+    if (
+      continuesWebsiteProjectRedirect &&
+      analysis.newCommercialProject === true &&
+      !analysis.changeOrCancelExisting
+    ) {
+      const nextState = applyUpdates(
+        {
+          ...defaultState(),
+          active: true,
+          stage: "collecting_details",
+          language: detectedLanguage,
+          customerName: state.customerName,
+          companyName: state.companyName,
+        },
+        analysis,
+      );
+      await saveState(contactId, nextState);
+      const firstName = getFirstName(nextState);
+      const propertyType = normalizeText(nextState.propertyType, 120);
+      return response.status(200).json({
+        ok: true,
+        handled: true,
+        language: detectedLanguage,
+        reply:
+          detectedLanguage === "es"
+            ? `Perfecto${firstName ? `, ${firstName}` : ""}. ¿Qué trabajo necesitas realizar${propertyType.toLowerCase() === "oficina" ? " en la oficina" : ` en la propiedad (${propertyType})`}?`
+            : `Perfect${firstName ? `, ${firstName}` : ""}. What work do you need at the ${propertyType}?`,
+        stage: nextState.stage,
       });
     }
 
