@@ -498,7 +498,7 @@ export function isResidentialPropertyMessage(value) {
 
 function selectsPreviousProperty(value) {
   const text = normalizeForIntent(value);
-  return /^(si|sí|yes|la misma|esa misma|misma direccion|misma propiedad|same one|same address|same property)\b/.test(text);
+  return /^(si|sí|yes|la misma|esa misma|misma direccion|misma propiedad|es para esa propiedad|es para la misma propiedad|es para esa direccion|same one|same address|same property|it is for that property|it is for the same property)\b/.test(text);
 }
 
 function selectsAnotherProperty(value) {
@@ -691,6 +691,8 @@ function defaultState() {
     propertyType: null,
     projectAddress: null,
     projectScope: null,
+    internalReviewedService: null,
+    internalReviewReference: null,
     email: null,
     emailAsked: false,
     previousPropertyAddress: null,
@@ -1209,6 +1211,48 @@ export function awaitingReviewedServiceVisitConfirmation(value, conversationId =
     return null;
   }
   return { ...review, service };
+}
+
+function sameReviewedService(left, right) {
+  const normalizedLeft = normalizeForIntent(cleanInternalReviewService(left));
+  const normalizedRight = normalizeForIntent(cleanInternalReviewService(right));
+  return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
+}
+
+export function reviewedServiceApprovedForDraft({
+  state,
+  customerReviewState,
+  projectScope,
+  currentMessage,
+}) {
+  const draftScope = normalizeText(state?.projectScope, 500);
+  const candidateScope = normalizeText(projectScope, 500) || draftScope;
+  if (!candidateScope) return false;
+
+  if (sameReviewedService(state?.internalReviewedService, candidateScope)) return true;
+
+  const review = safeJsonParse(customerReviewState, null);
+  if (!review || !sameReviewedService(review.service, candidateScope)) return false;
+
+  if (review.decision === "evaluate" && review.visitRequestStartedAt) return true;
+
+  const propertySelectionCreatedDuplicate =
+    state?.stage === "confirming_property_for_new_request" &&
+    review.status === "pending_internal_review" &&
+    sameReviewedService(review.service, draftScope) &&
+    (selectsPreviousProperty(review.details) ||
+      selectsAnotherProperty(review.details) ||
+      selectedKnownPropertyIndex(review.details, state?.knownProperties?.length ?? 0) !== null ||
+      isCompleteProjectAddress(review.details));
+
+  if (!propertySelectionCreatedDuplicate) return false;
+
+  return (
+    selectsPreviousProperty(currentMessage) ||
+    selectsAnotherProperty(currentMessage) ||
+    selectedKnownPropertyIndex(currentMessage, state?.knownProperties?.length ?? 0) !== null ||
+    isCompleteProjectAddress(currentMessage)
+  );
 }
 
 function getBaseUrl(request) {
@@ -1788,6 +1832,8 @@ export default async function handler(request, response) {
         currentMessage: effectiveCurrentMessage,
       });
       nextState.projectScope = reviewedServiceVisit.service;
+      nextState.internalReviewedService = reviewedServiceVisit.service;
+      nextState.internalReviewReference = normalizeText(reviewedServiceVisit.reference, 100) || null;
       await saveState(contactId, nextState);
       await saveCustomerReviewState(contactId, {
         ...reviewedServiceVisit,
@@ -1901,12 +1947,28 @@ export default async function handler(request, response) {
     const explicitlyOutOfScopeService =
       isClearlyOutOfScopeService(effectiveCurrentMessage) ||
       isClearlyOutOfScopeService(analysis.projectScope);
-    const internalReviewRequired = requiresInternalServiceReview({
-      currentMessage: effectiveCurrentMessage,
+    const reviewedServiceAlreadyApproved = reviewedServiceApprovedForDraft({
+      state,
+      customerReviewState: customFields?.[CUSTOMER_REVIEW_FIELD_NAME],
       projectScope: analysis.projectScope,
-      serviceInScope: analysis.serviceInScope,
-      bookingRelated: analysis.bookingRelated,
+      currentMessage: effectiveCurrentMessage,
     });
+    if (reviewedServiceAlreadyApproved && !state.internalReviewedService) {
+      state.internalReviewedService = normalizeText(state.projectScope, 500) ||
+        normalizeText(analysis.projectScope, 500);
+      state.internalReviewReference = normalizeText(
+        safeJsonParse(customFields?.[CUSTOMER_REVIEW_FIELD_NAME], null)?.reference,
+        100,
+      ) || null;
+    }
+    const internalReviewRequired =
+      !reviewedServiceAlreadyApproved &&
+      requiresInternalServiceReview({
+        currentMessage: effectiveCurrentMessage,
+        projectScope: analysis.projectScope,
+        serviceInScope: analysis.serviceInScope,
+        bookingRelated: analysis.bookingRelated,
+      });
 
     const detectedLanguage = analysis.language === "es" ? "es" : "en";
     const residentialRequest =
