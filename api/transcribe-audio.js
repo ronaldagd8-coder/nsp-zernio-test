@@ -39,6 +39,31 @@ function extractMessages(data) {
   );
 }
 
+function getMessageText(message) {
+  const candidates = [
+    message?.body,
+    message?.text,
+    message?.content,
+    message?.caption,
+    message?.message?.body,
+    message?.message?.text,
+    message?.message?.content,
+    message?.payload?.body,
+    message?.payload?.text,
+    message?.data?.body,
+    message?.data?.text,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = typeof candidate === "string"
+      ? candidate.trim().slice(0, 1500)
+      : "";
+    if (normalized) return normalized;
+  }
+
+  return "";
+}
+
 function extractAccounts(data) {
   const candidates = [
     data?.accounts,
@@ -276,6 +301,7 @@ export default async function handler(
         ok: true,
         isAudio: false,
         transcript: null,
+        messageText: getMessageText(latestMessage) || null,
       });
     }
 
