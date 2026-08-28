@@ -481,6 +481,34 @@ function isReviewableCommercialSupportService(value) {
     /\b(campana|campanas|hood|hoods|cocina industrial|cocinas industriales|commercial kitchen|commercial kitchens|kitchen exhaust|extractor de cocina|extractores de cocina)\b/.test(text);
 }
 
+function isConfirmedCommercialConstructionScope(value) {
+  const text = normalizeForIntent(value);
+  if (!text) return false;
+  if (detectConfirmedCommercialService(text)) return true;
+  return /\b(construccion|construir|construction|build[ -]?out|tenant improvements?|fit[ -]?out|remodelacion|remodelar|remodeling|renovacion|renovar|renovate|renovation|framing|drywall)\b/.test(
+    text,
+  );
+}
+
+export function requiresInternalServiceReview({
+  currentMessage,
+  projectScope,
+  serviceInScope,
+  bookingRelated,
+}) {
+  const candidate = normalizeText(projectScope, 500) || normalizeText(currentMessage, 500);
+  const messageIntent = normalizeForIntent(currentMessage);
+  const asksUnconfirmedCapability = isServiceCapabilityQuestion(currentMessage) ||
+    (/\?\s*$/.test(normalizeText(currentMessage, 500)) &&
+      /\b(hacen|ofrecen|realizan|revisan|instalan|reparan|mantienen|atienden|do you|can you|provide|service|inspect|install|repair|maintain)\b/.test(messageIntent));
+  if (!candidate || serviceInScope === false) return false;
+  if (isClearlyOutOfScopeService(candidate)) return false;
+  if (isConfirmedCommercialConstructionScope(candidate)) return false;
+  return isReviewableCommercialSupportService(candidate) ||
+    asksUnconfirmedCapability ||
+    (bookingRelated === true && Boolean(normalizeText(projectScope, 500)));
+}
+
 function isWebsiteDevelopmentRequest(value) {
   const text = normalizeForIntent(value);
   if (!text) return false;
@@ -1684,6 +1712,12 @@ export default async function handler(request, response) {
     const explicitlyOutOfScopeService =
       isClearlyOutOfScopeService(effectiveCurrentMessage) ||
       isClearlyOutOfScopeService(analysis.projectScope);
+    const internalReviewRequired = requiresInternalServiceReview({
+      currentMessage: effectiveCurrentMessage,
+      projectScope: analysis.projectScope,
+      serviceInScope: analysis.serviceInScope,
+      bookingRelated: analysis.bookingRelated,
+    });
 
     const detectedLanguage = analysis.language === "es" ? "es" : "en";
     const residentialRequest =
@@ -1896,6 +1930,42 @@ export default async function handler(request, response) {
           correctionLanguage === "es"
             ? `Entendido${correctionName ? `, ${correctionName}` : ""}. No enviaré la solicitud todavía. Para actualizar la ubicación sin asumir ningún dato, escribe por favor la dirección física completa corregida, incluyendo número, calle, ciudad, estado y código postal si lo tienes.`
             : `Understood${correctionName ? `, ${correctionName}` : ""}. I will not submit the request yet. To update the location without assuming any details, please enter the complete corrected physical address, including the street number, street name, city, state, and ZIP code if available.`,
+        stage: state.stage,
+      });
+    }
+
+    if (internalReviewRequired) {
+      const reviewService = normalizeText(analysis.projectScope, 500) ||
+        normalizeText(effectiveCurrentMessage, 500);
+      const reviewPropertyType = normalizeText(
+        analysis.propertyType ?? state.propertyType,
+        200,
+      );
+      const reviewAddress = normalizeText(
+        analysis.projectAddress ?? state.projectAddress,
+        500,
+      );
+      const reviewProperty = [reviewPropertyType, reviewAddress]
+        .filter(Boolean)
+        .join(" — ") || "No especificada";
+      return response.status(200).json({
+        ok: true,
+        handled: false,
+        internalReviewRequired: true,
+        bookingDraftPreserved: bookingContextActive,
+        language: detectedLanguage,
+        reply: null,
+        reviewRequest: {
+          customerContactIdentifier: contactId,
+          customerConversationId: conversationId,
+          customerName: formatPersonName(
+            state.customerName ?? analysis.customerName,
+          ) || "Cliente",
+          property: reviewProperty,
+          service: reviewService,
+          details: normalizeText(effectiveCurrentMessage, 1500),
+          customerLanguage: detectedLanguage,
+        },
         stage: state.stage,
       });
     }
