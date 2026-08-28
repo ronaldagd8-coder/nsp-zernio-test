@@ -1232,18 +1232,30 @@ export function reviewedServiceApprovedForDraft({
   if (sameReviewedService(state?.internalReviewedService, candidateScope)) return true;
 
   const review = safeJsonParse(customerReviewState, null);
-  if (!review || !sameReviewedService(review.service, candidateScope)) return false;
+  if (!review) return false;
 
-  if (review.decision === "evaluate" && review.visitRequestStartedAt) return true;
+  if (
+    sameReviewedService(review.service, candidateScope) &&
+    review.decision === "evaluate" &&
+    review.visitRequestStartedAt
+  ) {
+    return true;
+  }
+
+  const reviewDetailsSelectProperty =
+    selectsPreviousProperty(review.details) ||
+    selectsAnotherProperty(review.details) ||
+    selectedKnownPropertyIndex(review.details, state?.knownProperties?.length ?? 0) !== null ||
+    isCompleteProjectAddress(review.details);
+  const malformedReviewUsesPropertyAsService =
+    reviewDetailsSelectProperty && sameReviewedService(review.service, review.details);
 
   const propertySelectionCreatedDuplicate =
     state?.stage === "confirming_property_for_new_request" &&
     review.status === "pending_internal_review" &&
-    sameReviewedService(review.service, draftScope) &&
-    (selectsPreviousProperty(review.details) ||
-      selectsAnotherProperty(review.details) ||
-      selectedKnownPropertyIndex(review.details, state?.knownProperties?.length ?? 0) !== null ||
-      isCompleteProjectAddress(review.details));
+    reviewDetailsSelectProperty &&
+    (sameReviewedService(review.service, draftScope) ||
+      malformedReviewUsesPropertyAsService);
 
   if (!propertySelectionCreatedDuplicate) return false;
 
